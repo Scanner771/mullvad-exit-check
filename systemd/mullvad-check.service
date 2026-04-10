@@ -1,0 +1,14 @@
+[Unit]
+Description=Mullvad exit IP reputation check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/mullvad-exit-check/mullvad-check.py --config /opt/mullvad-exit-check/config.json
+# Uncomment and set your user:
+# User=mullvad
+# WorkingDirectory=/opt/mullvad-exit-check
+
+[Install]
+WantedBy=multi-user.target

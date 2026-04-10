@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Mullvad exit reputation check every 30 minutes
+
+[Timer]
+OnCalendar=*:00/30:00
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target

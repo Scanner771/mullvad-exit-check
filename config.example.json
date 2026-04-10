@@ -1,0 +1,7 @@
+{
+    "cities": ["lon", "ams", "fra", "par", "sto", "cph", "osl"],
+    "proximity": ["lon", "ams", "par", "fra", "cph", "osl", "sto"],
+    "output_dir": null,
+    "max_workers": 10,
+    "max_history": 336
+}
