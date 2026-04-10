@@ -23,6 +23,7 @@ Config file (optional JSON):
 
 import json, socket, re, ssl, sys
 import urllib.request
+from html import escape as h
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,13 +59,16 @@ def load_config(config_path=None):
         "max_workers": DEFAULT_MAX_WORKERS,
         "max_history": DEFAULT_MAX_HISTORY,
     }
-    if config_path and Path(config_path).exists():
-        try:
-            with open(config_path) as f:
-                user_cfg = json.load(f)
-            cfg.update({k: v for k, v in user_cfg.items() if k in cfg})
-        except (json.JSONDecodeError, OSError) as e:
-            print(f"Warning: couldn't load config: {e}", file=sys.stderr)
+    if config_path:
+        if not Path(config_path).exists():
+            print(f"Warning: config file not found: {config_path}", file=sys.stderr)
+        else:
+            try:
+                with open(config_path) as f:
+                    user_cfg = json.load(f)
+                cfg.update({k: v for k, v in user_cfg.items() if k in cfg})
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"Warning: couldn't load config: {e}", file=sys.stderr)
     return cfg
 
 
@@ -133,19 +137,6 @@ def check_honeypot(ip):
     return results
 
 
-def check_mullvad_blacklist(ip):
-    """Check Mullvad's own blacklist API for an IP."""
-    try:
-        req = urllib.request.Request(
-            f"https://am.i.mullvad.net/ip/{ip}",
-            headers={"User-Agent": "mullvad-exit-check/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            text = resp.read().decode()
-            return "blacklisted" in text.lower()
-    except Exception:
-        return None
-
 
 def check_fraud(ip):
     """Check IP fraud score via Scamalytics (free, no API key needed)."""
@@ -195,9 +186,7 @@ def get_verdict(listed, fraud):
         return "ELEVATED"
     if fraud >= 25:
         return "FAIR"
-    if fraud >= 0 or fraud == -1:
-        return "CLEAN" if not listed else "RISKY"
-    return "UNKNOWN"
+    return "CLEAN"
 
 
 # ── History ─────────────────────────────────────────────────────────────────
@@ -382,14 +371,14 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
             if lc and v != "CLEAN":
                 lc_html = f'<span class="last-clean" title="Last clean: {lc}">{lc[:10]}</span>'
 
-            owned_html = '<span class="owned-badge" title="Mullvad-owned">MV</span>' if owned else f'<span class="rented-badge" title="{provider}">{provider[:8] if provider else "3P"}</span>'
+            owned_html = '<span class="owned-badge" title="Mullvad-owned">MV</span>' if owned else f'<span class="rented-badge" title="{h(provider)}">{h(provider[:8]) if provider else "3P"}</span>'
 
             threat_color = f'color:var(--orange);' if threat_count >= 3 else f'color:var(--yellow);' if threat_count >= 1 else 'color:var(--muted);'
             rows.append((
                 VERDICT_ORDER.get(v, 5), fraud, hostname,
                 f'<tr class="verdict-{v.lower()}">'
-                f'<td>{hostname} {trend_html}</td>'
-                f'<td><code>{s["ip"]}</code></td>'
+                f'<td>{h(hostname)} {trend_html}</td>'
+                f'<td><code>{h(s["ip"])}</code></td>'
                 f'<td class="mono">{fraud if fraud >= 0 else "?"}</td>'
                 f'<td class="owner-cell">{owned_html}</td>'
                 f'<td class="dnsbl-cell">{dnsbl_str}</td>'
@@ -428,11 +417,11 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
     rec_rows = ""
     for prox, vo, fraud, tc, hostname, ip, city_name, flag, v, color, trend_html, spark, owned, provider in all_servers[:15]:
         threat_indicator = f'<span style="color:var(--orange)">{tc}</span>' if tc else '<span style="color:var(--muted)">0</span>'
-        owner_badge = '<span class="owned-badge">MV</span>' if owned else f'<span class="rented-badge">{provider[:6] if provider else "3P"}</span>'
+        owner_badge = '<span class="owned-badge">MV</span>' if owned else f'<span class="rented-badge">{h(provider[:6]) if provider else "3P"}</span>'
         rec_rows += (
             f'<tr>'
-            f'<td style="color:{color};font-weight:600">{hostname} {trend_html}</td>'
-            f'<td><code>{ip}</code></td>'
+            f'<td style="color:{color};font-weight:600">{h(hostname)} {trend_html}</td>'
+            f'<td><code>{h(ip)}</code></td>'
             f'<td>{flag} {city_name}</td>'
             f'<td>{owner_badge}</td>'
             f'<td class="mono">{fraud}</td>'
@@ -868,7 +857,11 @@ def main():
         done = 0
         for f in as_completed(futures):
             city = futures[f]
-            result = f.result()
+            try:
+                result = f.result()
+            except Exception as e:
+                print(f"  Error checking server in {city}: {e}", file=sys.stderr)
+                continue
             results.setdefault(city, []).append(result)
             done += 1
             if done % 10 == 0:
