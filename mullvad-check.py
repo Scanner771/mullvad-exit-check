@@ -21,7 +21,7 @@ Config file (optional JSON):
     }
 """
 
-import json, socket, re, ssl, os, sys
+import json, socket, re, ssl, sys
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -41,88 +41,12 @@ DNSBLS = [
     ("dnsbl-1.uceprotect.net", "UCEPROTECT"),
 ]
 
-# All known Mullvad WG city codes → (display name, country code, flag code)
-# The script auto-discovers cities from the API; this map provides display names.
-# If a city isn't listed here, it still gets checked — just with the raw code as name.
-KNOWN_CITIES = {
-    "ams": ("Amsterdam", "NL", "nl"),
-    "ath": ("Athens", "GR", "gr"),
-    "atl": ("Atlanta", "US", "us"),
-    "beg": ("Belgrade", "RS", "rs"),
-    "ber": ("Berlin", "DE", "de"),
-    "bkk": ("Bangkok", "TH", "th"),
-    "bma": ("Stockholm", "SE", "se"),
-    "bog": ("Bogota", "CO", "co"),
-    "bru": ("Brussels", "BE", "be"),
-    "bts": ("Bratislava", "SK", "sk"),
-    "bud": ("Budapest", "HU", "hu"),
-    "chi": ("Chicago", "US", "us"),
-    "cph": ("Copenhagen", "DK", "dk"),
-    "dal": ("Dallas", "US", "us"),
-    "den": ("Denver", "US", "us"),
-    "dub": ("Dublin", "IE", "ie"),
-    "dus": ("Dusseldorf", "DE", "de"),
-    "fra": ("Frankfurt", "DE", "de"),
-    "got": ("Gothenburg", "SE", "se"),
-    "hel": ("Helsinki", "FI", "fi"),
-    "hkg": ("Hong Kong", "HK", "hk"),
-    "jnb": ("Johannesburg", "ZA", "za"),
-    "lax": ("Los Angeles", "US", "us"),
-    "lis": ("Lisbon", "PT", "pt"),
-    "lon": ("London", "GB", "gb"),
-    "mad": ("Madrid", "ES", "es"),
-    "mel": ("Melbourne", "AU", "au"),
-    "mia": ("Miami", "US", "us"),
-    "mil": ("Milan", "IT", "it"),
-    "mma": ("Malmo", "SE", "se"),
-    "mrs": ("Marseille", "FR", "fr"),
-    "mtr": ("Montreal", "CA", "ca"),
-    "nyc": ("New York", "US", "us"),
-    "osl": ("Oslo", "NO", "no"),
-    "par": ("Paris", "FR", "fr"),
-    "prg": ("Prague", "CZ", "cz"),
-    "qas": ("Ashburn", "US", "us"),
-    "rag": ("Raleigh", "US", "us"),
-    "rix": ("Riga", "LV", "lv"),
-    "rom": ("Rome", "IT", "it"),
-    "sea": ("Seattle", "US", "us"),
-    "sin": ("Singapore", "SG", "sg"),
-    "sjc": ("San Jose", "US", "us"),
-    "slc": ("Salt Lake City", "US", "us"),
-    "sof": ("Sofia", "BG", "bg"),
-    "sto": ("Stockholm", "SE", "se"),
-    "svg": ("Stavanger", "NO", "no"),
-    "syd": ("Sydney", "AU", "au"),
-    "tia": ("Tirana", "AL", "al"),
-    "tky": ("Tokyo", "JP", "jp"),
-    "tor": ("Toronto", "CA", "ca"),
-    "van": ("Vancouver", "CA", "ca"),
-    "vie": ("Vienna", "AT", "at"),
-    "war": ("Warsaw", "PL", "pl"),
-    "zag": ("Zagreb", "HR", "hr"),
-    "zrh": ("Zurich", "CH", "ch"),
-}
 
-FLAG_EMOJI = {
-    "al": "\U0001f1e6\U0001f1f1", "at": "\U0001f1e6\U0001f1f9",
-    "au": "\U0001f1e6\U0001f1fa", "be": "\U0001f1e7\U0001f1ea",
-    "bg": "\U0001f1e7\U0001f1ec", "br": "\U0001f1e7\U0001f1f7",
-    "ca": "\U0001f1e8\U0001f1e6", "ch": "\U0001f1e8\U0001f1ed",
-    "co": "\U0001f1e8\U0001f1f4", "cz": "\U0001f1e8\U0001f1ff",
-    "de": "\U0001f1e9\U0001f1ea", "dk": "\U0001f1e9\U0001f1f0",
-    "es": "\U0001f1ea\U0001f1f8", "fi": "\U0001f1eb\U0001f1ee",
-    "fr": "\U0001f1eb\U0001f1f7", "gb": "\U0001f1ec\U0001f1e7",
-    "gr": "\U0001f1ec\U0001f1f7", "hk": "\U0001f1ed\U0001f1f0",
-    "hr": "\U0001f1ed\U0001f1f7", "hu": "\U0001f1ed\U0001f1fa",
-    "ie": "\U0001f1ee\U0001f1ea", "it": "\U0001f1ee\U0001f1f9",
-    "jp": "\U0001f1ef\U0001f1f5", "lv": "\U0001f1f1\U0001f1fb",
-    "nl": "\U0001f1f3\U0001f1f1", "no": "\U0001f1f3\U0001f1f4",
-    "pl": "\U0001f1f5\U0001f1f1", "pt": "\U0001f1f5\U0001f1f9",
-    "ro": "\U0001f1f7\U0001f1f4", "rs": "\U0001f1f7\U0001f1f8",
-    "se": "\U0001f1f8\U0001f1ea", "sg": "\U0001f1f8\U0001f1ec",
-    "sk": "\U0001f1f8\U0001f1f0", "th": "\U0001f1f9\U0001f1ed",
-    "us": "\U0001f1fa\U0001f1f8", "za": "\U0001f1ff\U0001f1e6",
-}
+def country_flag(country_code):
+    """Generate flag emoji from 2-letter country code."""
+    if not country_code or len(country_code) != 2:
+        return ""
+    return "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in country_code.upper())
 
 
 def load_config(config_path=None):
@@ -149,8 +73,9 @@ def load_config(config_path=None):
 def fetch_servers(city_filter=None):
     """Fetch active WireGuard servers from Mullvad API.
 
-    Args:
-        city_filter: optional list of city codes to include. None = all cities.
+    Returns:
+        servers: dict of city_code -> list of server dicts
+        city_meta: dict of city_code -> {"name", "country_code", "country_name"}
     """
     req = urllib.request.Request(
         "https://api.mullvad.net/www/relays/wireguard/",
@@ -159,26 +84,26 @@ def fetch_servers(city_filter=None):
     with urllib.request.urlopen(req, timeout=15) as resp:
         data = json.load(resp)
     servers = {}
+    city_meta = {}
     for s in data:
         city = s.get("city_code", "")
         if not s.get("active"):
             continue
         if city_filter and city not in city_filter:
             continue
+        if city not in city_meta:
+            city_meta[city] = {
+                "name": s.get("city_name", city.upper()),
+                "country_code": s.get("country_code", "").upper(),
+                "country_name": s.get("country_name", "Unknown"),
+            }
         servers.setdefault(city, []).append({
             "hostname": s["hostname"],
             "ip": s["ipv4_addr_in"],
             "owned": s.get("owned", False),
             "provider": s.get("provider", ""),
         })
-    return servers
-
-
-def city_info(city_code):
-    """Return (name, country, flag_code) for a city code."""
-    if city_code in KNOWN_CITIES:
-        return KNOWN_CITIES[city_code]
-    return (city_code.upper(), "??", "")
+    return servers, city_meta
 
 
 def check_dnsbl(ip, bl_host):
@@ -407,7 +332,7 @@ def health_gauge(clean_pct):
     </svg>"""
 
 
-def generate_html(results, timestamp, history, trends, last_clean, proximity_order):
+def generate_html(results, timestamp, history, trends, last_clean, proximity_order, city_meta):
     VERDICT_ORDER = {"CLEAN": 0, "FAIR": 1, "ELEVATED": 2, "RISKY": 3, "BURNED": 4, "UNKNOWN": 5}
 
     total_servers = 0
@@ -415,10 +340,13 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
     total_fair = 0
     all_servers = []
 
-    city_data = []
+    # Build per-city data
+    city_data = {}
     for city_code, entries in results.items():
-        name, country, flag_code = city_info(city_code)
-        flag = FLAG_EMOJI.get(flag_code, "")
+        meta = city_meta.get(city_code, {"name": city_code.upper(), "country_code": "??", "country_name": "Unknown"})
+        city_name = meta["name"]
+        cc = meta["country_code"].lower()
+        flag = country_flag(meta["country_code"])
         prox = proximity_order.index(city_code) if city_code in proximity_order else 99
         counts = defaultdict(int)
         rows = []
@@ -473,24 +401,24 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
             ))
 
             if v in ("CLEAN", "FAIR"):
-                all_servers.append((prox, VERDICT_ORDER.get(v, 5), fraud, threat_count, hostname, s["ip"], name, flag, v, color, trend_html, spark, owned, provider))
+                all_servers.append((prox, VERDICT_ORDER.get(v, 5), fraud, threat_count, hostname, s["ip"], city_name, flag, v, color, trend_html, spark, owned, provider))
 
         rows.sort(key=lambda r: (r[0], r[1], r[2]))
         html_rows = [r[3] for r in rows]
 
-        city_data.append({
+        city_data[city_code] = {
             "code": city_code,
-            "name": name,
+            "name": city_name,
             "flag": flag,
+            "country_code": meta["country_code"],
+            "country_name": meta["country_name"],
             "prox": prox,
             "rows": html_rows,
             "counts": dict(counts),
             "total": len(entries),
             "clean": counts.get("CLEAN", 0),
             "usable": counts.get("CLEAN", 0) + counts.get("FAIR", 0),
-        })
-
-    city_data.sort(key=lambda c: (-c["clean"], -c["usable"], c["prox"]))
+        }
 
     clean_pct = ((total_clean + total_fair) / total_servers * 100) if total_servers else 0
     gauge_svg = health_gauge(clean_pct)
@@ -534,29 +462,71 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
             <p class="rec-sub">All {total_servers} servers are DNSBL-listed or have elevated fraud scores. Consider trying different cities.</p>
         </div>"""
 
-    # City sections
+    # ── Group cities by country ──
+    countries = defaultdict(list)
+    for cd in city_data.values():
+        countries[cd["country_code"]].append(cd)
+
+    # Sort countries by name, cities within by clean count
+    sorted_countries = sorted(countries.items(), key=lambda x: city_meta.get(next((c["code"] for c in x[1]), ""), {}).get("country_name", x[0]))
+    for cc, cities in sorted_countries:
+        cities.sort(key=lambda c: (-c["clean"], -c["usable"], c["name"]))
+
     sections = ""
-    for c in city_data:
-        badges = ""
+    for cc, cities in sorted_countries:
+        country_name = cities[0]["country_name"]
+        country_flag_emoji = country_flag(cc)
+        country_total = sum(c["total"] for c in cities)
+        country_clean = sum(c["clean"] for c in cities)
+        country_usable = sum(c["usable"] for c in cities)
+        country_pct = (country_usable / country_total * 100) if country_total else 0
+        country_bar_color = "#22c55e" if country_pct >= 50 else "#f59e0b" if country_pct >= 20 else "#dc2626" if country_pct > 0 else "#333"
+
+        # Country-level badges
+        country_counts = defaultdict(int)
+        for c in cities:
+            for vname, cnt in c["counts"].items():
+                country_counts[vname] += cnt
+        country_badges = ""
         for vname in ["CLEAN", "FAIR", "ELEVATED", "RISKY", "BURNED"]:
-            cnt = c["counts"].get(vname, 0)
+            cnt = country_counts.get(vname, 0)
             if cnt:
-                badges += f' <span class="badge {vname.lower()}">{cnt} {vname.lower()}</span>'
-        pct = (c["usable"] / c["total"] * 100) if c["total"] else 0
-        bar_color = "#22c55e" if pct >= 50 else "#f59e0b" if pct >= 20 else "#dc2626" if pct > 0 else "#333"
+                country_badges += f' <span class="badge {vname.lower()}">{cnt} {vname.lower()}</span>'
+
+        # Build city sections within this country
+        city_sections = ""
+        for c in cities:
+            badges = ""
+            for vname in ["CLEAN", "FAIR", "ELEVATED", "RISKY", "BURNED"]:
+                cnt = c["counts"].get(vname, 0)
+                if cnt:
+                    badges += f' <span class="badge {vname.lower()}">{cnt} {vname.lower()}</span>'
+            pct = (c["usable"] / c["total"] * 100) if c["total"] else 0
+            bar_color = "#22c55e" if pct >= 50 else "#f59e0b" if pct >= 20 else "#dc2626" if pct > 0 else "#333"
+
+            city_sections += f"""
+            <details class="city">
+                <summary>
+                    <span class="city-name">{c['name']}</span>
+                    <span class="count">{c['total']} servers</span>
+                    <span class="mini-bar"><span class="mini-fill" style="width:{pct:.0f}%;background:{bar_color}"></span></span>
+                    {badges}
+                </summary>
+                <table>
+                    <tr><th>Server</th><th>IP</th><th>Fraud</th><th>Owner</th><th>DNSBL</th><th>Threat Intel</th><th>Verdict</th><th>History</th><th>Last Clean</th></tr>
+                    {"".join(c['rows'])}
+                </table>
+            </details>"""
 
         sections += f"""
-        <details class="city">
+        <details class="country" {"open" if len(cities) <= 3 else ""}>
             <summary>
-                <span class="city-name">{c['flag']} {c['name']}</span>
-                <span class="count">{c['total']} servers</span>
-                <span class="mini-bar"><span class="mini-fill" style="width:{pct:.0f}%;background:{bar_color}"></span></span>
-                {badges}
+                <span class="country-name">{country_flag_emoji} {country_name}</span>
+                <span class="count">{country_total} servers &middot; {len(cities)} {'city' if len(cities) == 1 else 'cities'}</span>
+                <span class="mini-bar"><span class="mini-fill" style="width:{country_pct:.0f}%;background:{country_bar_color}"></span></span>
+                {country_badges}
             </summary>
-            <table>
-                <tr><th>Server</th><th>IP</th><th>Fraud</th><th>Owner</th><th>DNSBL</th><th>Threat Intel</th><th>Verdict</th><th>History</th><th>Last Clean</th></tr>
-                {"".join(c['rows'])}
-            </table>
+            {city_sections}
         </details>"""
 
     history_note = ""
@@ -617,26 +587,50 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
   .recommended.warn h2 {{ color: var(--red); }}
   .rec-header {{ display: flex; justify-content: space-between; align-items: flex-start; }}
   .rec-sub {{ color: var(--muted); font-size: .8rem; margin-bottom: .7rem; }}
-  .city {{
+
+  /* ── Country sections ── */
+  .country {{
     background: var(--card); border: 1px solid var(--border);
-    border-radius: 8px; margin-bottom: .4rem;
+    border-radius: 10px; margin-bottom: .5rem;
     transition: border-color .15s;
   }}
+  .country:hover {{ border-color: #3f3f46; }}
+  .country > summary {{
+    font-size: 1rem; font-weight: 700; padding: .75rem 1rem;
+    cursor: pointer; display: flex; align-items: center; gap: .5rem;
+    flex-wrap: wrap; list-style: none; user-select: none;
+  }}
+  .country > summary::-webkit-details-marker {{ display: none; }}
+  .country > summary::before {{
+    content: "\\25b6"; font-size: .65rem; color: var(--muted);
+    transition: transform .15s; flex-shrink: 0;
+  }}
+  .country[open] > summary::before {{ transform: rotate(90deg); }}
+  .country[open] {{ border-color: #3f3f46; }}
+  .country-name {{ min-width: 140px; }}
+
+  /* ── City sections (nested inside country) ── */
+  .city {{
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; margin: .3rem .8rem;
+    transition: border-color .15s;
+  }}
+  .city:last-child {{ margin-bottom: .8rem; }}
   .city:hover {{ border-color: #3f3f46; }}
   .city summary {{
-    font-size: .95rem; font-weight: 600; padding: .65rem 1rem;
+    font-size: .9rem; font-weight: 600; padding: .55rem .9rem;
     cursor: pointer; display: flex; align-items: center; gap: .5rem;
     flex-wrap: wrap; list-style: none; user-select: none;
   }}
   .city summary::-webkit-details-marker {{ display: none; }}
   .city summary::before {{
-    content: "\\25b6"; font-size: .6rem; color: var(--muted);
+    content: "\\25b6"; font-size: .55rem; color: var(--muted);
     transition: transform .15s; flex-shrink: 0;
   }}
   .city[open] summary::before {{ transform: rotate(90deg); }}
   .city[open] {{ border-color: #3f3f46; }}
   .city table {{ margin: 0 .8rem .8rem; width: calc(100% - 1.6rem); }}
-  .city-name {{ min-width: 120px; }}
+  .city-name {{ min-width: 100px; }}
   .count {{ color: var(--muted); font-weight: 400; font-size: .82rem; }}
   .mini-bar {{
     width: 50px; height: 4px; background: #27272a; border-radius: 2px;
@@ -703,7 +697,8 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
   @media (max-width: 640px) {{
     body {{ padding: .8rem; }}
     .header {{ flex-direction: column; align-items: flex-start; }}
-    .city summary {{ font-size: .85rem; padding: .5rem .7rem; }}
+    .country > summary {{ font-size: .9rem; padding: .6rem .7rem; }}
+    .city summary {{ font-size: .82rem; padding: .45rem .6rem; }}
     .lc-cell, th:last-child {{ display: none; }}
     td:last-child {{ display: none; }}
   }}
@@ -722,9 +717,9 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
 
 <div class="filters">
     <label>Filter:</label>
-    <button class="filter-btn active" onclick="setFilter('',this)">All ({total_servers})</button>
-    <button class="filter-btn" onclick="setFilter('clean',this)">Clean only ({total_clean})</button>
-    <button class="filter-btn" onclick="setFilter('usable',this)">Usable ({total_clean + total_fair})</button>
+    <button class="filter-btn active" onclick="setFilter('',this)" title="Show all servers">All ({total_servers})</button>
+    <button class="filter-btn" onclick="setFilter('clean',this)" title="Only servers with no DNSBL listings and low fraud score">Clean only ({total_clean})</button>
+    <button class="filter-btn" onclick="setFilter('usable',this)" title="Servers rated Clean or Fair">Usable ({total_clean + total_fair})</button>
 </div>
 
 <div class="legend">
@@ -750,11 +745,19 @@ function setFilter(mode, el) {{
     document.body.className = mode ? 'filter-' + mode : '';
     document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
     el.classList.add('active');
+    // Hide city cards where all rows are filtered out
     document.querySelectorAll('details.city').forEach(d => {{
         const allRows = d.querySelectorAll('tr[class^="verdict-"]');
         let shown = 0;
         allRows.forEach(r => {{ if (getComputedStyle(r).display !== 'none') shown++; }});
         d.style.display = shown === 0 ? 'none' : '';
+    }});
+    // Hide country cards where all cities are hidden
+    document.querySelectorAll('details.country').forEach(d => {{
+        const cities = d.querySelectorAll('details.city');
+        let visible = 0;
+        cities.forEach(c => {{ if (c.style.display !== 'none') visible++; }});
+        d.style.display = visible === 0 ? 'none' : '';
     }});
 }}
 </script>
@@ -764,7 +767,7 @@ function setFilter(mode, el) {{
 
 # ── JSON API ────────────────────────────────────────────────────────────────
 
-def generate_api_json(results, timestamp, trends, proximity_order):
+def generate_api_json(results, timestamp, trends, proximity_order, city_meta):
     """Generate a compact JSON summary."""
     VERDICT_ORDER = {"CLEAN": 0, "FAIR": 1, "ELEVATED": 2, "RISKY": 3, "BURNED": 4, "UNKNOWN": 5}
 
@@ -774,7 +777,9 @@ def generate_api_json(results, timestamp, trends, proximity_order):
     recommended = []
 
     for city_code, entries in results.items():
-        name, country, flag_code = city_info(city_code)
+        meta = city_meta.get(city_code, {"name": city_code.upper(), "country_code": "??"})
+        city_name = meta["name"]
+        cc = meta["country_code"]
         prox = proximity_order.index(city_code) if city_code in proximity_order else 99
 
         for s in entries:
@@ -790,8 +795,8 @@ def generate_api_json(results, timestamp, trends, proximity_order):
                     "vo": VERDICT_ORDER.get(v, 5),
                     "hostname": s["hostname"],
                     "ip": s["ip"],
-                    "city": name,
-                    "country": flag_code.upper(),
+                    "city": city_name,
+                    "country": cc,
                     "fraud": s["fraud"],
                     "verdict": v,
                     "owned": s.get("owned", False),
@@ -825,7 +830,6 @@ def main():
 
     cfg = load_config(args.config)
 
-    # CLI args override config file
     city_filter = args.cities or cfg["cities"]
     output_dir = Path(args.output_dir) if args.output_dir else (Path(cfg["output_dir"]) if cfg["output_dir"] else Path(__file__).parent)
     max_workers = cfg["max_workers"]
@@ -836,20 +840,22 @@ def main():
     api_file = output_dir / "mullvad-api.json"
     history_file = output_dir / "mullvad-history.json"
 
-    # Build proximity order from config or auto-detect
     if cfg["proximity"]:
         proximity_order = cfg["proximity"]
     else:
-        # Default: alphabetical by city code
-        proximity_order = sorted(KNOWN_CITIES.keys())
+        proximity_order = sorted(list(set()))  # empty = alphabetical fallback
 
     print("Fetching Mullvad server list...", flush=True)
-    servers = fetch_servers(city_filter)
+    servers, city_meta = fetch_servers(city_filter)
     total = sum(len(v) for v in servers.values())
     if total == 0:
         print("No servers found. Check your city filter or network connection.")
         sys.exit(1)
     print(f"Checking {total} servers across {len(servers)} cities...", flush=True)
+
+    # If no proximity set, default to alphabetical by city name
+    if not proximity_order:
+        proximity_order = sorted(servers.keys(), key=lambda c: city_meta.get(c, {}).get("name", c))
 
     results = {}
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -870,25 +876,22 @@ def main():
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    # History
     history = append_to_history(results, ts, history_file, max_history)
     trends = compute_trends(history, results)
     last_clean = compute_last_clean(history)
 
-    # Generate HTML
-    html = generate_html(results, ts, history, trends, last_clean, proximity_order)
+    html = generate_html(results, ts, history, trends, last_clean, proximity_order, city_meta)
     output_file.write_text(html)
 
-    # Generate JSON API
-    api_data = generate_api_json(results, ts, trends, proximity_order)
+    api_data = generate_api_json(results, ts, trends, proximity_order, city_meta)
     api_file.write_text(json.dumps(api_data, indent=2))
 
     print(f"\nReport: {output_file}")
     print(f"API:    {api_file}")
     print(f"History: {len(history)} snapshots in {history_file}")
 
-    for city_code, entries in sorted(results.items()):
-        name = city_info(city_code)[0]
+    for city_code, entries in sorted(results.items(), key=lambda x: city_meta.get(x[0], {}).get("name", x[0])):
+        name = city_meta.get(city_code, {}).get("name", city_code)
         clean = sum(1 for s in entries if s["verdict"] == "CLEAN")
         usable = sum(1 for s in entries if s["verdict"] in ("CLEAN", "FAIR"))
         print(f"  {name}: {clean} clean, {usable} usable / {len(entries)}")
