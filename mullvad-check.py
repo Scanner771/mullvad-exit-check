@@ -321,7 +321,7 @@ def health_gauge(clean_pct):
     </svg>"""
 
 
-def generate_html(results, timestamp, history, trends, last_clean, proximity_order, city_meta):
+def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proximity_order, city_meta, prev_health_pct=None):
     VERDICT_ORDER = {"CLEAN": 0, "FAIR": 1, "ELEVATED": 2, "RISKY": 3, "BURNED": 4, "UNKNOWN": 5}
 
     total_servers = 0
@@ -377,7 +377,7 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
             rows.append((
                 VERDICT_ORDER.get(v, 5), fraud, hostname,
                 f'<tr class="verdict-{v.lower()}">'
-                f'<td>{h(hostname)} {trend_html}</td>'
+                f'<td class="hostname-cell" onclick="copyHost(\'{h(hostname)}\')" title="Click to copy">{h(hostname)} {trend_html}</td>'
                 f'<td><code>{h(s["ip"])}</code></td>'
                 f'<td class="mono">{fraud if fraud >= 0 else "?"}</td>'
                 f'<td class="owner-cell">{owned_html}</td>'
@@ -412,6 +412,20 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
     clean_pct = ((total_clean + total_fair) / total_servers * 100) if total_servers else 0
     gauge_svg = health_gauge(clean_pct)
 
+    # Overall health trend
+    health_trend_html = ""
+    if prev_health_pct is not None:
+        diff = clean_pct - prev_health_pct
+        if diff >= 2:
+            health_trend_html = f'<span class="health-trend up" title="+{diff:.0f}% vs last check">&#9650; +{diff:.0f}%</span>'
+        elif diff <= -2:
+            health_trend_html = f'<span class="health-trend down" title="{diff:.0f}% vs last check">&#9660; {diff:.0f}%</span>'
+        else:
+            health_trend_html = '<span class="health-trend stable" title="No change vs last check">&#9644; stable</span>'
+
+    # Build export list of clean/usable hostnames
+    export_hostnames = [s[4] for s in sorted(all_servers, key=lambda s: (s[0], s[1], s[2]))]
+
     # Recommended box
     all_servers.sort(key=lambda s: (s[0], s[1], s[2]))
     rec_rows = ""
@@ -420,7 +434,7 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
         owner_badge = '<span class="owned-badge">MV</span>' if owned else f'<span class="rented-badge">{h(provider[:6]) if provider else "3P"}</span>'
         rec_rows += (
             f'<tr>'
-            f'<td style="color:{color};font-weight:600">{h(hostname)} {trend_html}</td>'
+            f'<td class="hostname-cell" style="color:{color};font-weight:600" onclick="copyHost(\'{h(hostname)}\')" title="Click to copy">{h(hostname)} {trend_html}</td>'
             f'<td><code>{h(ip)}</code></td>'
             f'<td>{flag} {city_name}</td>'
             f'<td>{owner_badge}</td>'
@@ -549,7 +563,28 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
   .header {{ display: flex; align-items: center; gap: 1.2rem; margin-bottom: 1rem; flex-wrap: wrap; }}
   .header-text h1 {{ font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; }}
   .header-text .sub {{ color: var(--muted); font-size: .82rem; margin-top: .15rem; }}
-  .gauge {{ flex-shrink: 0; }}
+  .gauge {{ flex-shrink: 0; text-align: center; }}
+  .health-trend {{ display: block; font-size: .72rem; font-weight: 600; margin-top: -.2rem; }}
+  .health-trend.up {{ color: var(--green); }}
+  .health-trend.down {{ color: var(--red); }}
+  .health-trend.stable {{ color: var(--muted); }}
+  .relative-time {{ color: var(--muted); font-size: .75rem; }}
+  .hostname-cell {{ cursor: pointer; position: relative; }}
+  .hostname-cell:hover {{ color: var(--green); }}
+  .copy-toast {{
+    position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%);
+    background: var(--green-dim); border: 1px solid var(--green); color: var(--green);
+    padding: .4rem 1rem; border-radius: 6px; font-size: .8rem; font-weight: 600;
+    z-index: 999; opacity: 0; transition: opacity .2s;
+    pointer-events: none;
+  }}
+  .copy-toast.show {{ opacity: 1; }}
+  .export-btn {{
+    background: var(--card); border: 1px solid var(--border); color: var(--muted);
+    padding: .35rem .8rem; border-radius: 6px; font-size: .75rem; cursor: pointer;
+    transition: all .15s; white-space: nowrap; margin-left: auto;
+  }}
+  .export-btn:hover {{ border-color: var(--green); color: var(--green); }}
   .filters {{
     display: flex; gap: .4rem; margin-bottom: 1rem; flex-wrap: wrap;
     padding: .5rem .7rem; background: var(--card); border: 1px solid var(--border);
@@ -719,12 +754,13 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
 <body>
 
 <div class="header">
-    <div class="gauge">{gauge_svg}</div>
+    <div class="gauge">{gauge_svg}{health_trend_html}</div>
     <div class="header-text">
         <h1>Mullvad Exit Reputation</h1>
-        <div class="sub">Updated {timestamp}{history_note}</div>
+        <div class="sub">Updated <time id="update-time" datetime="{ts_iso}">{timestamp}</time> <span id="relative-time" class="relative-time"></span>{history_note}</div>
         <div class="sub">{total_servers} servers across {len(city_data)} cities &mdash; {total_clean} clean, {total_fair} fair</div>
     </div>
+    <button class="export-btn" onclick="exportClean()" title="Download list of clean/usable server hostnames">Export clean list</button>
 </div>
 
 <div class="filters">
@@ -749,6 +785,8 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
 {rec_box}
 {sections}
 <div class="search-no-results" id="no-results">No countries or cities match your search.</div>
+<div class="copy-toast" id="copy-toast">Copied!</div>
+<script id="export-data" type="application/json">{json.dumps(export_hostnames)}</script>
 
 <div class="footer">
     DNSBLs: {', '.join(n for _, n in DNSBLS)} | Fraud scoring: Scamalytics | Threat intel: Abusix, Honeypot, CBL, XBL<br>
@@ -756,6 +794,7 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
 </div>
 
 <script>
+// ── Filters ──
 function setFilter(mode, el) {{
     document.body.className = mode ? 'filter-' + mode : '';
     document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
@@ -772,66 +811,116 @@ function setFilter(mode, el) {{
         cities.forEach(c => {{ if (c.style.display !== 'none') visible++; }});
         d.style.display = visible === 0 ? 'none' : '';
     }});
-    // Re-apply search if active
     const q = document.getElementById('search').value;
     if (q) doSearch(q);
 }}
 
+// ── Search ──
 function doSearch(query) {{
     const q = query.toLowerCase().trim();
     const noResults = document.getElementById('no-results');
     let anyVisible = false;
-    // Collapse recommended box when searching, restore when cleared
     const rec = document.querySelector('details.recommended');
     if (rec) rec.open = !q;
 
     document.querySelectorAll('details.country').forEach(country => {{
         const countryName = country.querySelector('.country-name').textContent.toLowerCase();
         const countryMatch = !q || countryName.includes(q);
-
         let anyCityVisible = false;
+
         country.querySelectorAll('details.city').forEach(city => {{
             const cityName = city.querySelector('.city-name').textContent.toLowerCase();
             const match = countryMatch || cityName.includes(q);
-            // Respect verdict filter
             if (match && city.style.display !== 'none') {{
                 city.removeAttribute('data-search-hidden');
                 anyCityVisible = true;
             }} else if (!match) {{
                 city.setAttribute('data-search-hidden', '1');
-            }} else {{
-                anyCityVisible = anyCityVisible || false;
             }}
             city.style.display = (match && !city.hasAttribute('data-filter-hidden')) ? '' : 'none';
         }});
 
         if (q) {{
-            // Show/hide country based on search
             country.style.display = (countryMatch || anyCityVisible) ? '' : 'none';
-            // Auto-open matching countries
             if (countryMatch || anyCityVisible) {{
                 country.open = true;
                 anyVisible = true;
-                // Auto-open matching cities if specific city search
                 if (!countryMatch && anyCityVisible) {{
                     country.querySelectorAll('details.city').forEach(city => {{
-                        if (!city.hasAttribute('data-search-hidden') && city.style.display !== 'none') {{
-                            city.open = true;
-                        }}
+                        if (!city.hasAttribute('data-search-hidden') && city.style.display !== 'none') city.open = true;
                     }});
                 }}
             }}
         }} else {{
-            // No search query — show all (respect filter only)
             country.style.display = '';
             anyVisible = true;
         }}
     }});
-
     noResults.classList.toggle('visible', q && !anyVisible);
 }}
 
-// Keyboard shortcut: / to focus search
+// ── Click to copy hostname ──
+function copyHost(name) {{
+    navigator.clipboard.writeText(name).then(() => {{
+        const toast = document.getElementById('copy-toast');
+        toast.textContent = 'Copied: ' + name;
+        toast.classList.add('show');
+        setTimeout(() => toast.classList.remove('show'), 1500);
+    }});
+}}
+
+// ── Export clean list ──
+function exportClean() {{
+    const data = JSON.parse(document.getElementById('export-data').textContent);
+    if (!data.length) {{ alert('No clean/usable servers to export.'); return; }}
+    const blob = new Blob([data.join('\\n') + '\\n'], {{type: 'text/plain'}});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'mullvad-clean-exits.txt';
+    a.click();
+    URL.revokeObjectURL(a.href);
+}}
+
+// ── Relative time ──
+function updateRelativeTime() {{
+    const el = document.getElementById('update-time');
+    const rel = document.getElementById('relative-time');
+    if (!el || !rel) return;
+    const then = new Date(el.getAttribute('datetime'));
+    const diff = Math.floor((Date.now() - then) / 1000);
+    let text;
+    if (diff < 60) text = 'just now';
+    else if (diff < 3600) text = Math.floor(diff / 60) + ' min ago';
+    else if (diff < 86400) text = Math.floor(diff / 3600) + 'h ago';
+    else text = Math.floor(diff / 86400) + 'd ago';
+    rel.textContent = '(' + text + ')';
+}}
+
+// ── Local timezone ──
+function localizeTime() {{
+    const el = document.getElementById('update-time');
+    if (!el) return;
+    const d = new Date(el.getAttribute('datetime'));
+    el.textContent = d.toLocaleString(undefined, {{
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false
+    }});
+}}
+
+// ── Dynamic favicon based on health ──
+function setFavicon() {{
+    const gauge = document.querySelector('.gauge svg text');
+    if (!gauge) return;
+    const pct = parseInt(gauge.textContent);
+    const color = pct >= 50 ? '%2322c55e' : pct >= 25 ? '%23f59e0b' : '%23dc2626';
+    const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'><circle cx='16' cy='16' r='14' fill='${color}'/><text x='16' y='21' text-anchor='middle' fill='white' font-size='14' font-weight='700' font-family='sans-serif'>${{pct}}</text></svg>`;
+    const link = document.querySelector("link[rel='icon']") || document.createElement('link');
+    link.rel = 'icon';
+    link.href = 'data:image/svg+xml,' + svg;
+    document.head.appendChild(link);
+}}
+
+// ── Keyboard shortcuts ──
 document.addEventListener('keydown', e => {{
     if (e.key === '/' && document.activeElement.tagName !== 'INPUT') {{
         e.preventDefault();
@@ -844,6 +933,12 @@ document.addEventListener('keydown', e => {{
         doSearch('');
     }}
 }});
+
+// ── Init ──
+localizeTime();
+updateRelativeTime();
+setFavicon();
+setInterval(updateRelativeTime, 60000);
 </script>
 </body>
 </html>"""
@@ -962,13 +1057,24 @@ def main():
             if done % 10 == 0:
                 print(f"  {done}/{total}...", flush=True)
 
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now_utc = datetime.now(timezone.utc)
+    ts = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+    ts_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     history = append_to_history(results, ts, history_file, max_history)
     trends = compute_trends(history, results)
     last_clean = compute_last_clean(history)
 
-    html = generate_html(results, ts, history, trends, last_clean, proximity_order, city_meta)
+    # Compute previous health % for overall trend
+    prev_health_pct = None
+    if len(history) >= 2:
+        prev_snap = history[-2]
+        prev_total = len(prev_snap["servers"])
+        if prev_total:
+            prev_usable = sum(1 for v in prev_snap["servers"].values() if v in ("CLEAN", "FAIR"))
+            prev_health_pct = prev_usable / prev_total * 100
+
+    html = generate_html(results, ts, ts_iso, history, trends, last_clean, proximity_order, city_meta, prev_health_pct)
     output_file.write_text(html)
 
     api_data = generate_api_json(results, ts, trends, proximity_order, city_meta)
