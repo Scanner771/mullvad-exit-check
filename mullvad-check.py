@@ -423,40 +423,31 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
         else:
             health_trend_html = '<span class="health-trend stable" title="No change vs last check">&#9644; stable</span>'
 
-    # Build export list of clean/usable hostnames
+    # Build export list + recommended data as JSON for client-side sorting
     export_hostnames = [s[4] for s in sorted(all_servers, key=lambda s: (s[0], s[1], s[2]))]
 
-    # Recommended box
-    all_servers.sort(key=lambda s: (s[0], s[1], s[2]))
-    rec_rows = ""
-    for prox, vo, fraud, tc, hostname, ip, city_name, flag, v, color, trend_html, spark, owned, provider in all_servers[:15]:
-        threat_indicator = f'<span style="color:var(--orange)">{tc}</span>' if tc else '<span style="color:var(--muted)">0</span>'
-        owner_badge = '<span class="owned-badge">MV</span>' if owned else f'<span class="rented-badge">{h(provider[:6]) if provider else "3P"}</span>'
-        rec_rows += (
-            f'<tr>'
-            f'<td class="hostname-cell" style="color:{color};font-weight:600" onclick="copyHost(\'{h(hostname)}\')" title="Click to copy">{h(hostname)} {trend_html}</td>'
-            f'<td><code>{h(ip)}</code></td>'
-            f'<td>{flag} {city_name}</td>'
-            f'<td>{owner_badge}</td>'
-            f'<td class="mono">{fraud}</td>'
-            f'<td class="mono">{threat_indicator}</td>'
-            f'<td style="color:{color};font-weight:700">{v}</td>'
-            f'<td>{spark}</td>'
-            f'</tr>'
-        )
-    if rec_rows:
-        rec_box = f"""
-        <details class="recommended" open>
+    # Embed all usable servers as JSON for JS-based proximity sorting
+    rec_data = []
+    for prox, vo, fraud, tc, hostname, ip, city_name, flag, v, color, trend_html, spark, owned, provider in all_servers:
+        rec_data.append({
+            "h": hostname, "ip": ip, "city": city_name, "flag": flag,
+            "v": v, "fraud": fraud, "threats": tc,
+            "owned": owned, "provider": provider[:6] if provider else "",
+            "trend": trend_html, "spark": spark,
+        })
+
+    rec_box = f"""
+        <details class="recommended" open id="rec-box">
             <summary class="rec-toggle">
                 <h2>Recommended Exits</h2>
-                <p class="rec-sub">Top {min(len(all_servers), 15)} usable servers sorted by proximity &mdash; {total_clean} clean, {total_fair} fair out of {total_servers}</p>
+                <p class="rec-sub" id="rec-sub">Top usable servers sorted by proximity to you &mdash; {total_clean} clean, {total_fair} fair out of {total_servers}</p>
             </summary>
             <table>
-                <tr><th>Server</th><th>IP</th><th>City</th><th>Owner</th><th>Fraud</th><th>Threats</th><th>Verdict</th><th>History</th></tr>
-                {rec_rows}
+                <tr><th>Server</th><th>IP</th><th>City</th><th>Owner</th><th>Fraud</th><th>Threats</th><th>Verdict</th></tr>
+                <tbody id="rec-body"><tr><td colspan="7" style="color:var(--muted);text-align:center;padding:1rem">Detecting your region...</td></tr></tbody>
             </table>
         </details>"""
-    else:
+    if not rec_data:
         rec_box = f"""
         <details class="recommended warn" open>
             <summary class="rec-toggle">
@@ -585,6 +576,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
     transition: all .15s; white-space: nowrap; margin-left: auto;
   }}
   .export-btn:hover {{ border-color: var(--green); color: var(--green); }}
+  .dist-label {{ color: var(--muted); font-size: .7rem; font-weight: 400; }}
   .filters {{
     display: flex; gap: .4rem; margin-bottom: 1rem; flex-wrap: wrap;
     padding: .5rem .7rem; background: var(--card); border: 1px solid var(--border);
@@ -787,6 +779,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
 <div class="search-no-results" id="no-results">No countries or cities match your search.</div>
 <div class="copy-toast" id="copy-toast">Copied!</div>
 <script id="export-data" type="application/json">{json.dumps(export_hostnames)}</script>
+<script id="rec-data" type="application/json">{json.dumps(rec_data)}</script>
 
 <div class="footer">
     DNSBLs: {', '.join(n for _, n in DNSBLS)} | Fraud scoring: Scamalytics | Threat intel: Abusix, Honeypot, CBL, XBL<br>
@@ -934,10 +927,129 @@ document.addEventListener('keydown', e => {{
     }}
 }});
 
+// ── Proximity-based recommended ──
+const CITY_COORDS = {{
+    'Adelaide':[34.9,138.6],'Amsterdam':[52.4,4.9],'Ashburn':[39.0,-77.5],'Athens':[37.9,23.7],
+    'Atlanta':[33.7,-84.4],'Auckland':[-36.8,174.8],'Bangkok':[13.8,100.5],'Barcelona':[41.4,2.2],
+    'Belgrade':[44.8,20.5],'Berlin':[52.5,13.4],'Bogota':[4.7,-74.1],'Bordeaux':[44.8,-0.6],
+    'Boston':[42.4,-71.1],'Bratislava':[48.1,17.1],'Brisbane':[-27.5,153.0],'Brussels':[50.8,4.4],
+    'Bucharest':[44.4,26.1],'Budapest':[47.5,19.0],'Buenos Aires':[-34.6,-58.4],'Calgary':[51.0,-114.1],
+    'Chicago':[41.9,-87.6],'Copenhagen':[55.7,12.6],'Dallas':[32.8,-96.8],'Denver':[39.7,-105.0],
+    'Detroit':[42.3,-83.0],'Dublin':[53.3,-6.3],'Dusseldorf':[51.2,6.8],'Fortaleza':[-3.7,-38.5],
+    'Frankfurt':[50.1,8.7],'Glasgow':[55.9,-4.3],'Gothenburg':[57.7,12.0],'Helsinki':[60.2,24.9],
+    'Hong Kong':[22.3,114.2],'Houston':[29.8,-95.4],'Istanbul':[41.0,29.0],'Jakarta':[-6.2,106.8],
+    'Johannesburg':[-26.2,28.0],'Kansas City':[39.1,-94.6],'Kuala Lumpur':[3.1,101.7],
+    'Kyiv':[50.5,30.5],'Lagos':[6.5,3.4],'Lima':[-12.0,-77.0],'Lisbon':[38.7,-9.1],
+    'Ljubljana':[46.1,14.5],'London':[51.5,-0.1],'Los Angeles':[34.1,-118.2],'Madrid':[40.4,-3.7],
+    'Manchester':[53.5,-2.2],'Manila':[14.6,121.0],'Marseille':[43.3,5.4],'McAllen':[26.2,-98.2],
+    'Melbourne':[-37.8,145.0],'Miami':[25.8,-80.2],'Milan':[45.5,9.2],'Montreal':[45.5,-73.6],
+    'New York':[40.7,-74.0],'Nicosia':[35.2,33.4],'Osaka':[34.7,135.5],'Oslo':[59.9,10.8],
+    'Palermo':[38.1,13.4],'Paris':[48.9,2.3],'Perth':[-31.9,115.9],'Phoenix':[33.4,-112.1],
+    'Prague':[50.1,14.4],'Queretaro':[20.6,-100.4],'Raleigh':[35.8,-78.6],'Rome':[41.9,12.5],
+    'Salt Lake City':[40.8,-111.9],'San Jose':[37.3,-121.9],'Santiago':[-33.4,-70.6],
+    'Sao Paulo':[-23.5,-46.6],'Seattle':[47.6,-122.3],'Secaucus':[40.8,-74.1],'Singapore':[1.4,103.8],
+    'Sofia':[42.7,23.3],'Stavanger':[59.0,5.7],'Stockholm':[59.3,18.1],'Sydney':[-33.9,151.2],
+    'Tallinn':[59.4,24.7],'Tel Aviv':[32.1,34.8],'Tirana':[41.3,19.8],'Tokyo':[35.7,139.7],
+    'Toronto':[43.7,-79.4],'Valencia':[39.5,-0.4],'Vancouver':[49.3,-123.1],'Vienna':[48.2,16.4],
+    'Warsaw':[52.2,21.0],'Washington DC':[38.9,-77.0],'Zagreb':[45.8,16.0],'Zurich':[47.4,8.5],
+    'Malmo':[55.6,13.0],'Malmö':[55.6,13.0],
+}};
+
+// Map timezone to approximate coordinates
+const TZ_COORDS = {{
+    'America/New_York':[40.7,-74],'America/Chicago':[41.9,-87.6],'America/Denver':[39.7,-105],
+    'America/Los_Angeles':[34.1,-118.2],'America/Toronto':[43.7,-79.4],'America/Vancouver':[49.3,-123.1],
+    'America/Montreal':[45.5,-73.6],'America/Phoenix':[33.4,-112.1],'America/Detroit':[42.3,-83],
+    'America/Sao_Paulo':[-23.5,-46.6],'America/Buenos_Aires':[-34.6,-58.4],'America/Mexico_City':[19.4,-99.1],
+    'America/Bogota':[4.7,-74.1],'America/Lima':[-12,-77],'America/Santiago':[-33.4,-70.6],
+    'Europe/London':[51.5,-0.1],'Europe/Paris':[48.9,2.3],'Europe/Berlin':[52.5,13.4],
+    'Europe/Amsterdam':[52.4,4.9],'Europe/Brussels':[50.8,4.4],'Europe/Madrid':[40.4,-3.7],
+    'Europe/Rome':[41.9,12.5],'Europe/Zurich':[47.4,8.5],'Europe/Vienna':[48.2,16.4],
+    'Europe/Stockholm':[59.3,18.1],'Europe/Oslo':[59.9,10.8],'Europe/Copenhagen':[55.7,12.6],
+    'Europe/Helsinki':[60.2,24.9],'Europe/Warsaw':[52.2,21],'Europe/Prague':[50.1,14.4],
+    'Europe/Budapest':[47.5,19],'Europe/Bucharest':[44.4,26.1],'Europe/Dublin':[53.3,-6.3],
+    'Europe/Lisbon':[38.7,-9.1],'Europe/Athens':[37.9,23.7],'Europe/Istanbul':[41,29],
+    'Europe/Kiev':[50.5,30.5],'Europe/Moscow':[55.8,37.6],
+    'Asia/Tokyo':[35.7,139.7],'Asia/Singapore':[1.4,103.8],'Asia/Hong_Kong':[22.3,114.2],
+    'Asia/Bangkok':[13.8,100.5],'Asia/Kuala_Lumpur':[3.1,101.7],'Asia/Jakarta':[-6.2,106.8],
+    'Asia/Manila':[14.6,121],'Asia/Kolkata':[19,72.8],'Asia/Dubai':[25.3,55.3],
+    'Asia/Tel_Aviv':[32.1,34.8],'Asia/Seoul':[37.6,127],
+    'Australia/Sydney':[-33.9,151.2],'Australia/Melbourne':[-37.8,145],'Australia/Perth':[-31.9,115.9],
+    'Australia/Brisbane':[-27.5,153],'Australia/Adelaide':[-34.9,138.6],
+    'Pacific/Auckland':[-36.8,174.8],
+    'Africa/Johannesburg':[-26.2,28],'Africa/Lagos':[6.5,3.4],
+}};
+
+function haversine(lat1, lon1, lat2, lon2) {{
+    const R = 6371;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLon/2)**2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}}
+
+function getUserCoords() {{
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (TZ_COORDS[tz]) return {{ coords: TZ_COORDS[tz], tz: tz }};
+    // Fallback: try partial match
+    for (const [key, val] of Object.entries(TZ_COORDS)) {{
+        if (tz.includes(key.split('/')[1] || '')) return {{ coords: val, tz: tz }};
+    }}
+    return null;
+}}
+
+const VERDICT_COLORS = {{CLEAN:'#22c55e',FAIR:'#a3e635',ELEVATED:'#f97316',RISKY:'#f59e0b',BURNED:'#dc2626',UNKNOWN:'#6b7280'}};
+
+function buildRecommended() {{
+    const dataEl = document.getElementById('rec-data');
+    const body = document.getElementById('rec-body');
+    const sub = document.getElementById('rec-sub');
+    if (!dataEl || !body) return;
+
+    const servers = JSON.parse(dataEl.textContent);
+    if (!servers.length) return;
+
+    const user = getUserCoords();
+    let regionLabel = 'your region';
+
+    if (user) {{
+        const [uLat, uLon] = user.coords;
+        regionLabel = user.tz.split('/').pop().replace(/_/g, ' ');
+        // Compute distance for each server
+        servers.forEach(s => {{
+            const cc = CITY_COORDS[s.city];
+            s.dist = cc ? haversine(uLat, uLon, cc[0], cc[1]) : 99999;
+        }});
+        servers.sort((a, b) => a.dist - b.dist || a.fraud - b.fraud);
+    }}
+
+    const top = servers.slice(0, 15);
+    let html = '';
+    top.forEach(s => {{
+        const color = VERDICT_COLORS[s.v] || '#6b7280';
+        const tc = s.threats;
+        const threat = tc ? `<span style="color:var(--orange)">${{tc}}</span>` : '<span style="color:var(--muted)">0</span>';
+        const owner = s.owned ? '<span class="owned-badge">MV</span>' : `<span class="rented-badge">${{s.provider || '3P'}}</span>`;
+        const distLabel = s.dist < 99999 ? ` <span class="dist-label">${{Math.round(s.dist)}} km</span>` : '';
+        html += `<tr>
+            <td class="hostname-cell" style="color:${{color}};font-weight:600" onclick="copyHost('${{s.h}}')" title="Click to copy">${{s.h}} ${{s.trend}}</td>
+            <td><code>${{s.ip}}</code></td>
+            <td>${{s.flag}} ${{s.city}}${{distLabel}}</td>
+            <td>${{owner}}</td>
+            <td class="mono">${{s.fraud}}</td>
+            <td class="mono">${{threat}}</td>
+            <td style="color:${{color}};font-weight:700">${{s.v}}</td>
+        </tr>`;
+    }});
+    body.innerHTML = html;
+    if (sub) sub.innerHTML = `Top ${{top.length}} usable servers nearest to ${{regionLabel}} &mdash; detected from your timezone`;
+}}
+
 // ── Init ──
 localizeTime();
 updateRelativeTime();
 setFavicon();
+buildRecommended();
 setInterval(updateRelativeTime, 60000);
 </script>
 </body>
