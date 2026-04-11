@@ -101,11 +101,25 @@ def fetch_servers(city_filter=None):
                 "country_code": s.get("country_code", "").upper(),
                 "country_name": s.get("country_name", "Unknown"),
             }
+        speed = s.get("network_port_speed", 0)
+        features = []
+        if s.get("stboot"):
+            features.append("RAM-only")
+        if s.get("daita"):
+            features.append("DAITA")
+        if s.get("socks_name"):
+            features.append("SOCKS5")
+        if s.get("multihop_port"):
+            features.append("Multihop")
+        if s.get("ipv6_addr_in"):
+            features.append("IPv6")
         servers.setdefault(city, []).append({
             "hostname": s["hostname"],
             "ip": s["ipv4_addr_in"],
             "owned": s.get("owned", False),
             "provider": s.get("provider", ""),
+            "speed": speed,
+            "features": features,
         })
     return servers, city_meta
 
@@ -169,6 +183,8 @@ def check_server(server_info):
         "ip": ip,
         "owned": server_info.get("owned", False),
         "provider": server_info.get("provider", ""),
+        "speed": server_info.get("speed", 0),
+        "features": server_info.get("features", []),
         "dnsbl": listed_on,
         "threat": extra_lists,
         "fraud": fraud,
@@ -277,7 +293,7 @@ VERDICT_COLORS = {
     "FAIR": "#a3e635",
     "ELEVATED": "#f97316",
     "RISKY": "#f59e0b",
-    "BURNED": "#dc2626",
+    "BURNED": "#ef4444",
     "UNKNOWN": "#6b7280",
 }
 
@@ -309,7 +325,7 @@ def health_gauge(clean_pct):
     elif clean_pct >= 25:
         color = "#f59e0b"
     else:
-        color = "#dc2626"
+        color = "#ef4444"
 
     return f"""<svg width="120" height="80" viewBox="0 0 120 80">
       <path d="M {sx:.1f} {sy:.1f} A {r} {r} 0 1 1 {cx + r * math.cos(math.radians(135)):.1f} {cy + r * math.sin(math.radians(135)):.1f}"
@@ -351,6 +367,8 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
             hostname = s["hostname"]
             owned = s.get("owned", False)
             provider = s.get("provider", "")
+            speed = s.get("speed", 0)
+            features = s.get("features", [])
             trend = trends.get(hostname, "")
             lc = last_clean.get(hostname, "")
             spark = sparkline_html(compute_history_sparkline(history, hostname))
@@ -371,7 +389,24 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
             if lc and v != "CLEAN":
                 lc_html = f'<span class="last-clean" title="Last clean: {lc}">{lc[:10]}</span>'
 
-            owned_html = '<span class="owned-badge" title="Mullvad-owned">MV</span>' if owned else f'<span class="rented-badge" title="{h(provider)}">{h(provider[:8]) if provider else "3P"}</span>'
+            # Build info tooltip
+            tip_parts = []
+            if owned:
+                tip_parts.append("Mullvad-owned")
+            else:
+                tip_parts.append(f"Provider: {provider or 'Unknown'}")
+            if speed:
+                tip_parts.append(f"{speed} Gbps")
+            if features:
+                tip_parts.append(" | ".join(features))
+            tip_text = h(" · ".join(tip_parts))
+
+            # Feature pills for inline display
+            feat_html = ""
+            if features:
+                feat_html = " " + " ".join(f'<span class="feat-pill">{h(f)}</span>' for f in features[:3])
+
+            owned_html = f'<span class="owned-badge info-tip" title="{tip_text}">MV{feat_html}</span>' if owned else f'<span class="rented-badge info-tip" title="{tip_text}">{h(provider[:8]) if provider else "3P"}{feat_html}</span>'
 
             threat_color = f'color:var(--orange);' if threat_count >= 3 else f'color:var(--yellow);' if threat_count >= 1 else 'color:var(--muted);'
             rows.append((
@@ -534,7 +569,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="1800">
-<title>Mullvad Exit Reputation</title>
+<title>Mullvad Exit Reputation &mdash; {clean_pct:.0f}% usable ({total_clean} clean/{total_servers})</title>
 <style>
   :root {{
     --bg: #09090b; --card: #111113; --card-hover: #18181b;
@@ -542,7 +577,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
     --green: #22c55e; --green-dim: #052e16;
     --yellow: #f59e0b; --yellow-dim: #451a03;
     --orange: #f97316; --orange-dim: #431407;
-    --red: #dc2626; --red-dim: #450a0a;
+    --red: #ef4444; --red-dim: #450a0a;
     --lime: #a3e635;
   }}
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
@@ -560,8 +595,12 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
   .health-trend.down {{ color: var(--red); }}
   .health-trend.stable {{ color: var(--muted); }}
   .relative-time {{ color: var(--muted); font-size: .75rem; }}
-  .hostname-cell {{ cursor: pointer; position: relative; }}
-  .hostname-cell:hover {{ color: var(--green); }}
+  .hostname-cell {{
+    cursor: pointer; position: relative;
+    text-decoration: underline; text-decoration-color: transparent;
+    text-decoration-style: dotted; transition: color .15s, text-decoration-color .15s;
+  }}
+  .hostname-cell:hover {{ color: var(--green); text-decoration-color: var(--green); }}
   .copy-toast {{
     position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%);
     background: var(--green-dim); border: 1px solid var(--green); color: var(--green);
@@ -577,6 +616,14 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
   }}
   .export-btn:hover {{ border-color: var(--green); color: var(--green); }}
   .dist-label {{ color: var(--muted); font-size: .7rem; font-weight: 400; }}
+  .feat-pill {{
+    background: #1e293b; color: #94a3b8; font-size: .6rem; font-weight: 500;
+    padding: .05rem .3rem; border-radius: 3px; margin-left: .2rem;
+    white-space: nowrap;
+  }}
+  .info-tip {{ cursor: default; }}
+  .footer-link {{ color: var(--muted); transition: color .15s; }}
+  .footer-link:hover {{ color: var(--text); }}
   .filters {{
     display: flex; gap: .4rem; margin-bottom: 1rem; flex-wrap: wrap;
     padding: .5rem .7rem; background: var(--card); border: 1px solid var(--border);
@@ -584,7 +631,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
   }}
   .filters label {{ color: var(--muted); font-size: .78rem; margin-right: .3rem; }}
   .filter-btn {{
-    background: transparent; border: 1px solid var(--border); color: var(--text);
+    background: var(--card); border: 1px solid var(--border); color: var(--text);
     padding: .25rem .65rem; border-radius: 6px; font-size: .78rem; cursor: pointer;
     transition: all .15s;
   }}
@@ -594,8 +641,8 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
   .search-box {{
     background: var(--bg); border: 1px solid var(--border); color: var(--text);
     padding: .25rem .6rem; border-radius: 6px; font-size: .78rem;
-    outline: none; width: 180px; transition: border-color .15s;
-    font-family: inherit;
+    outline: none; width: 180px; flex: 1; min-width: 120px;
+    transition: border-color .15s; font-family: inherit;
   }}
   .search-box:focus {{ border-color: var(--green); }}
   .search-box::placeholder {{ color: var(--muted); }}
@@ -668,7 +715,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
   }}
   .city[open] summary::before {{ transform: rotate(90deg); }}
   .city[open] {{ border-color: #3f3f46; }}
-  .city table {{ margin: 0 .8rem .8rem; width: calc(100% - 1.6rem); }}
+  .city table {{ margin: 0 .8rem .8rem; width: calc(100% - 1.6rem); overflow-x: auto; display: block; }}
   .city-name {{ min-width: 100px; }}
   .count {{ color: var(--muted); font-weight: 400; font-size: .82rem; }}
   .mini-bar {{
@@ -685,7 +732,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
   td {{ padding: .3rem .5rem; border-bottom: 1px solid #1e1e1e; }}
   tr:last-child td {{ border-bottom: none; }}
   code {{
-    background: #1a1a1e; padding: .1rem .4rem; border-radius: 3px;
+    background: #222228; padding: .1rem .4rem; border-radius: 3px;
     font-size: .78rem; font-family: 'JetBrains Mono', 'Fira Code', monospace;
   }}
   .mono {{ font-family: 'JetBrains Mono', monospace; text-align: center; }}
@@ -783,7 +830,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
 
 <div class="footer">
     DNSBLs: {', '.join(n for _, n in DNSBLS)} | Fraud scoring: Scamalytics | Threat intel: Abusix, Honeypot, CBL, XBL<br>
-    Auto-refreshes every 30 minutes | <a href="https://github.com/Scanner771/mullvad-exit-check" style="color:var(--muted)">mullvad-exit-check</a>
+    Auto-refreshes every 30 minutes | <a href="https://github.com/Scanner771/mullvad-exit-check" class="footer-link">mullvad-exit-check</a>
 </div>
 
 <script>
