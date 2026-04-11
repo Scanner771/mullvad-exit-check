@@ -563,6 +563,20 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
   }}
   .filter-btn:hover {{ background: var(--card-hover); }}
   .filter-btn.active {{ background: var(--green-dim); border-color: var(--green); color: var(--green); }}
+  .filter-sep {{ width: 1px; height: 20px; background: var(--border); margin: 0 .3rem; }}
+  .search-box {{
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: .25rem .6rem; border-radius: 6px; font-size: .78rem;
+    outline: none; width: 180px; transition: border-color .15s;
+    font-family: inherit;
+  }}
+  .search-box:focus {{ border-color: var(--green); }}
+  .search-box::placeholder {{ color: var(--muted); }}
+  .search-no-results {{
+    color: var(--muted); font-size: .85rem; padding: 1rem;
+    text-align: center; display: none;
+  }}
+  .search-no-results.visible {{ display: block; }}
   .recommended {{
     background: linear-gradient(135deg, #0a1a0a 0%, #0d1f0d 100%);
     border: 1px solid #166534; border-radius: 10px;
@@ -709,6 +723,8 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
     <button class="filter-btn active" onclick="setFilter('',this)" title="Show all servers">All ({total_servers})</button>
     <button class="filter-btn" onclick="setFilter('clean',this)" title="Only servers with no DNSBL listings and low fraud score">Clean only ({total_clean})</button>
     <button class="filter-btn" onclick="setFilter('usable',this)" title="Servers rated Clean or Fair">Usable ({total_clean + total_fair})</button>
+    <span class="filter-sep"></span>
+    <input type="text" id="search" class="search-box" placeholder="Search country or city..." oninput="doSearch(this.value)" autocomplete="off" spellcheck="false">
 </div>
 
 <div class="legend">
@@ -723,6 +739,7 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
 
 {rec_box}
 {sections}
+<div class="search-no-results" id="no-results">No countries or cities match your search.</div>
 
 <div class="footer">
     DNSBLs: {', '.join(n for _, n in DNSBLS)} | Fraud scoring: Scamalytics | Threat intel: Abusix, Honeypot, CBL, XBL<br>
@@ -734,21 +751,87 @@ function setFilter(mode, el) {{
     document.body.className = mode ? 'filter-' + mode : '';
     document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
     el.classList.add('active');
-    // Hide city cards where all rows are filtered out
     document.querySelectorAll('details.city').forEach(d => {{
         const allRows = d.querySelectorAll('tr[class^="verdict-"]');
         let shown = 0;
         allRows.forEach(r => {{ if (getComputedStyle(r).display !== 'none') shown++; }});
         d.style.display = shown === 0 ? 'none' : '';
     }});
-    // Hide country cards where all cities are hidden
     document.querySelectorAll('details.country').forEach(d => {{
         const cities = d.querySelectorAll('details.city');
         let visible = 0;
         cities.forEach(c => {{ if (c.style.display !== 'none') visible++; }});
         d.style.display = visible === 0 ? 'none' : '';
     }});
+    // Re-apply search if active
+    const q = document.getElementById('search').value;
+    if (q) doSearch(q);
 }}
+
+function doSearch(query) {{
+    const q = query.toLowerCase().trim();
+    const noResults = document.getElementById('no-results');
+    let anyVisible = false;
+
+    document.querySelectorAll('details.country').forEach(country => {{
+        const countryName = country.querySelector('.country-name').textContent.toLowerCase();
+        const countryMatch = !q || countryName.includes(q);
+
+        let anyCityVisible = false;
+        country.querySelectorAll('details.city').forEach(city => {{
+            const cityName = city.querySelector('.city-name').textContent.toLowerCase();
+            const match = countryMatch || cityName.includes(q);
+            // Respect verdict filter
+            if (match && city.style.display !== 'none') {{
+                city.removeAttribute('data-search-hidden');
+                anyCityVisible = true;
+            }} else if (!match) {{
+                city.setAttribute('data-search-hidden', '1');
+            }} else {{
+                anyCityVisible = anyCityVisible || false;
+            }}
+            city.style.display = (match && !city.hasAttribute('data-filter-hidden')) ? '' : 'none';
+        }});
+
+        if (q) {{
+            // Show/hide country based on search
+            country.style.display = (countryMatch || anyCityVisible) ? '' : 'none';
+            // Auto-open matching countries
+            if (countryMatch || anyCityVisible) {{
+                country.open = true;
+                anyVisible = true;
+                // Auto-open matching cities if specific city search
+                if (!countryMatch && anyCityVisible) {{
+                    country.querySelectorAll('details.city').forEach(city => {{
+                        if (!city.hasAttribute('data-search-hidden') && city.style.display !== 'none') {{
+                            city.open = true;
+                        }}
+                    }});
+                }}
+            }}
+        }} else {{
+            // No search query — show all (respect filter only)
+            country.style.display = '';
+            anyVisible = true;
+        }}
+    }});
+
+    noResults.classList.toggle('visible', q && !anyVisible);
+}}
+
+// Keyboard shortcut: / to focus search
+document.addEventListener('keydown', e => {{
+    if (e.key === '/' && document.activeElement.tagName !== 'INPUT') {{
+        e.preventDefault();
+        document.getElementById('search').focus();
+    }}
+    if (e.key === 'Escape') {{
+        const s = document.getElementById('search');
+        s.value = '';
+        s.blur();
+        doSearch('');
+    }}
+}});
 </script>
 </body>
 </html>"""
