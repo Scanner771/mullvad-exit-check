@@ -103,8 +103,6 @@ def fetch_servers(city_filter=None):
             }
         speed = s.get("network_port_speed", 0)
         features = []
-        if s.get("stboot"):
-            features.append("RAM-only")
         if s.get("daita"):
             features.append("DAITA")
         if s.get("socks_name"):
@@ -408,10 +406,19 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
 
             owned_html = f'<span class="owned-badge info-tip" title="{tip_text}">MV{feat_html}</span>' if owned else f'<span class="rented-badge info-tip" title="{tip_text}">{h(provider[:8]) if provider else "3P"}{feat_html}</span>'
 
+            # Data attributes for JS feature filtering
+            feat_keys = []
+            if "SOCKS5" in features: feat_keys.append("socks5")
+            if "DAITA" in features: feat_keys.append("daita")
+            if "Multihop" in features: feat_keys.append("multihop")
+            if "IPv6" in features: feat_keys.append("ipv6")
+            if owned: feat_keys.append("owned")
+            data_feats = " ".join(feat_keys)
+
             threat_color = f'color:var(--orange);' if threat_count >= 3 else f'color:var(--yellow);' if threat_count >= 1 else 'color:var(--muted);'
             rows.append((
                 VERDICT_ORDER.get(v, 5), fraud, hostname,
-                f'<tr class="verdict-{v.lower()}">'
+                f'<tr class="verdict-{v.lower()}" data-features="{data_feats}">'
                 f'<td class="hostname-cell" onclick="copyHost(\'{h(hostname)}\')" title="Click to copy">{h(hostname)} {trend_html}</td>'
                 f'<td><code>{h(s["ip"])}</code></td>'
                 f'<td class="mono">{fraud if fraud >= 0 else "?"}</td>'
@@ -464,11 +471,21 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
     # Embed all usable servers as JSON for JS-based proximity sorting
     rec_data = []
     for prox, vo, fraud, tc, hostname, ip, city_name, flag, v, color, trend_html, spark, owned, provider in all_servers:
+        # Look up features for this server from results
+        srv_features = []
+        for city_entries in results.values():
+            for sr in city_entries:
+                if sr["hostname"] == hostname:
+                    srv_features = sr.get("features", [])
+                    break
+            if srv_features:
+                break
         rec_data.append({
             "h": hostname, "ip": ip, "city": city_name, "flag": flag,
             "v": v, "fraud": fraud, "threats": tc,
             "owned": owned, "provider": provider[:6] if provider else "",
             "trend": trend_html, "spark": spark,
+            "features": srv_features,
         })
 
     rec_box = f"""
@@ -478,8 +495,8 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
                 <p class="rec-sub" id="rec-sub">Top usable servers sorted by proximity to you &mdash; {total_clean} clean, {total_fair} fair out of {total_servers}</p>
             </summary>
             <table>
-                <tr><th>Server</th><th>IP</th><th>City</th><th>Owner</th><th>Fraud</th><th>Threats</th><th>Verdict</th></tr>
-                <tbody id="rec-body"><tr><td colspan="7" style="color:var(--muted);text-align:center;padding:1rem">Detecting your region...</td></tr></tbody>
+                <tr><th>Server</th><th>IP</th><th>City</th><th>Owner</th><th>Features</th><th>Fraud</th><th>Threats</th><th>Verdict</th></tr>
+                <tbody id="rec-body"><tr><td colspan="8" style="color:var(--muted);text-align:center;padding:1rem">Detecting your region...</td></tr></tbody>
             </table>
         </details>"""
     if not rec_data:
@@ -621,6 +638,20 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
     padding: .05rem .3rem; border-radius: 3px; margin-left: .2rem;
     white-space: nowrap;
   }}
+  .feat-filters {{
+    display: flex; gap: .4rem; margin-bottom: 1rem; flex-wrap: wrap;
+    padding: .5rem .7rem; background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; align-items: center;
+  }}
+  .feat-filters label {{ color: var(--muted); font-size: .78rem; margin-right: .3rem; }}
+  .feat-btn {{
+    background: var(--card); border: 1px solid var(--border); color: var(--text);
+    padding: .25rem .65rem; border-radius: 6px; font-size: .78rem; cursor: pointer;
+    transition: all .15s;
+  }}
+  .feat-btn:hover {{ background: var(--card-hover); }}
+  .feat-btn.active {{ border-color: #7c3aed; color: #c084fc; background: rgba(124,58,237,.1); }}
+  .feat-btn.all-active {{ border-color: var(--green); color: var(--green); background: var(--green-dim); }}
   .info-tip {{ cursor: default; }}
   .footer-link {{ color: var(--muted); transition: color .15s; }}
   .footer-link:hover {{ color: var(--text); }}
@@ -811,6 +842,17 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
     <input type="text" id="search" class="search-box" placeholder="Search country or city..." oninput="doSearch(this.value)" autocomplete="off" spellcheck="false">
 </div>
 
+<div class="feat-filters">
+    <label>Features:</label>
+    <button class="feat-btn" onclick="toggleFeat('socks5',this)">SOCKS5</button>
+    <button class="feat-btn" onclick="toggleFeat('daita',this)">DAITA</button>
+    <button class="feat-btn" onclick="toggleFeat('multihop',this)">Multihop</button>
+    <button class="feat-btn" onclick="toggleFeat('ipv6',this)">IPv6</button>
+    <button class="feat-btn" onclick="toggleFeat('owned',this)">Mullvad-owned</button>
+    <button class="feat-btn" onclick="toggleAllFeats(this)">Match All</button>
+    <span id="feat-count" style="color:var(--muted);font-size:.78rem;margin-left:.3rem"></span>
+</div>
+
 <div class="legend">
   <span><span class="dot" style="background:var(--green)"></span> Clean</span>
   <span><span class="dot" style="background:var(--lime)"></span> Fair</span>
@@ -853,6 +895,72 @@ function setFilter(mode, el) {{
     }});
     const q = document.getElementById('search').value;
     if (q) doSearch(q);
+}}
+
+// ── Feature filters ──
+let activeFeats = new Set();
+let matchAllMode = false;
+
+function toggleFeat(feat, el) {{
+    if (activeFeats.has(feat)) {{
+        activeFeats.delete(feat);
+        el.classList.remove('active');
+    }} else {{
+        activeFeats.add(feat);
+        el.classList.add('active');
+    }}
+    applyFeatureFilter();
+}}
+
+function toggleAllFeats(el) {{
+    matchAllMode = !matchAllMode;
+    el.classList.toggle('all-active', matchAllMode);
+    el.textContent = matchAllMode ? 'Match All (AND)' : 'Match All';
+    applyFeatureFilter();
+}}
+
+function applyFeatureFilter() {{
+    const rows = document.querySelectorAll('tr[data-features]');
+    let totalVisible = 0;
+    rows.forEach(r => {{
+        let featMatch = true;
+        if (activeFeats.size > 0) {{
+            const rowFeats = r.getAttribute('data-features').split(' ');
+            if (matchAllMode) {{
+                featMatch = [...activeFeats].every(f => rowFeats.includes(f));
+            }} else {{
+                featMatch = [...activeFeats].some(f => rowFeats.includes(f));
+            }}
+        }}
+        if (!featMatch) {{
+            r.style.display = 'none';
+        }} else {{
+            r.style.removeProperty('display');
+        }}
+        if (r.style.display !== 'none' && getComputedStyle(r).display !== 'none') totalVisible++;
+    }});
+
+    // Hide empty city/country cards
+    document.querySelectorAll('details.city').forEach(d => {{
+        const allRows = d.querySelectorAll('tr[data-features]');
+        let shown = 0;
+        allRows.forEach(r => {{ if (r.style.display !== 'none' && getComputedStyle(r).display !== 'none') shown++; }});
+        d.style.display = shown === 0 ? 'none' : '';
+    }});
+    document.querySelectorAll('details.country').forEach(d => {{
+        const cities = d.querySelectorAll('details.city');
+        let visible = 0;
+        cities.forEach(c => {{ if (c.style.display !== 'none') visible++; }});
+        d.style.display = visible === 0 ? 'none' : '';
+    }});
+
+    const countEl = document.getElementById('feat-count');
+    if (countEl) {{
+        countEl.textContent = activeFeats.size > 0 ? `(${{totalVisible}} match)` : '';
+    }}
+
+    // Rebuild recommended with feature filter applied
+    buildRecommended();
 }}
 
 // ── Search ──
@@ -1070,7 +1178,24 @@ function buildRecommended() {{
         servers.sort((a, b) => a.dist - b.dist || a.fraud - b.fraud);
     }}
 
-    const top = servers.slice(0, 15);
+    // Apply feature filter to recommended list
+    let filtered = servers;
+    if (typeof activeFeats !== 'undefined' && activeFeats.size > 0) {{
+        const FEAT_MAP = {{'SOCKS5':'socks5','DAITA':'daita','Multihop':'multihop','IPv6':'ipv6'}};
+        filtered = servers.filter(s => {{
+            const sFeats = (s.features || []).map(f => FEAT_MAP[f] || f.toLowerCase());
+            if (s.owned) sFeats.push('owned');
+            const mAll = typeof matchAllMode !== 'undefined' && matchAllMode;
+            if (mAll) {{
+                return [...activeFeats].every(f => sFeats.includes(f));
+            }} else {{
+                return [...activeFeats].some(f => sFeats.includes(f));
+            }}
+        }});
+    }}
+
+    const FEAT_PILLS = {{'SOCKS5':'S5','DAITA':'DA','Multihop':'MH','IPv6':'v6'}};
+    const top = filtered.slice(0, 15);
     let html = '';
     top.forEach(s => {{
         const color = VERDICT_COLORS[s.v] || '#6b7280';
@@ -1078,18 +1203,21 @@ function buildRecommended() {{
         const threat = tc ? `<span style="color:var(--orange)">${{tc}}</span>` : '<span style="color:var(--muted)">0</span>';
         const owner = s.owned ? '<span class="owned-badge">MV</span>' : `<span class="rented-badge">${{s.provider || '3P'}}</span>`;
         const distLabel = s.dist < 99999 ? ` <span class="dist-label">${{Math.round(s.dist)}} km</span>` : '';
+        const feats = (s.features || []).map(f => `<span class="feat-pill">${{FEAT_PILLS[f] || f}}</span>`).join('');
         html += `<tr>
             <td class="hostname-cell" style="color:${{color}};font-weight:600" onclick="copyHost('${{s.h}}')" title="Click to copy">${{s.h}} ${{s.trend}}</td>
             <td><code>${{s.ip}}</code></td>
             <td>${{s.flag}} ${{s.city}}${{distLabel}}</td>
             <td>${{owner}}</td>
+            <td style="white-space:nowrap">${{feats}}</td>
             <td class="mono">${{s.fraud}}</td>
             <td class="mono">${{threat}}</td>
             <td style="color:${{color}};font-weight:700">${{s.v}}</td>
         </tr>`;
     }});
-    body.innerHTML = html;
-    if (sub) sub.innerHTML = `Top ${{top.length}} usable servers nearest to ${{regionLabel}} &mdash; detected from your timezone`;
+    body.innerHTML = html || '<tr><td colspan="8" style="color:var(--muted);text-align:center;padding:1rem">No servers match the selected features</td></tr>';
+    const featNote = activeFeats && activeFeats.size > 0 ? ` (filtered by ${{[...activeFeats].join(matchAllMode ? ' + ' : ' / ')}})` : '';
+    if (sub) sub.innerHTML = `Top ${{top.length}} usable servers nearest to ${{regionLabel}}${{featNote}} &mdash; detected from your timezone`;
 }}
 
 // ── Init ──
@@ -1141,6 +1269,7 @@ def generate_api_json(results, timestamp, trends, proximity_order, city_meta):
                     "provider": s.get("provider", ""),
                     "trend": trend,
                     "threats": len(s.get("threat", [])),
+                    "features": s.get("features", []),
                 })
 
     recommended.sort(key=lambda s: (s["rank"], s["vo"], s["fraud"]))
