@@ -432,24 +432,24 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
         )
     if rec_rows:
         rec_box = f"""
-        <div class="recommended">
-            <div class="rec-header">
-                <div>
-                    <h2>Recommended Exits</h2>
-                    <p class="rec-sub">Top {min(len(all_servers), 15)} usable servers sorted by proximity &mdash; {total_clean} clean, {total_fair} fair out of {total_servers}</p>
-                </div>
-            </div>
+        <details class="recommended" open>
+            <summary class="rec-toggle">
+                <h2>Recommended Exits</h2>
+                <p class="rec-sub">Top {min(len(all_servers), 15)} usable servers sorted by proximity &mdash; {total_clean} clean, {total_fair} fair out of {total_servers}</p>
+            </summary>
             <table>
                 <tr><th>Server</th><th>IP</th><th>City</th><th>Owner</th><th>Fraud</th><th>Threats</th><th>Verdict</th><th>History</th></tr>
                 {rec_rows}
             </table>
-        </div>"""
+        </details>"""
     else:
         rec_box = f"""
-        <div class="recommended warn">
-            <h2>No Clean Exits Available</h2>
-            <p class="rec-sub">All {total_servers} servers are DNSBL-listed or have elevated fraud scores. Consider trying different cities.</p>
-        </div>"""
+        <details class="recommended warn" open>
+            <summary class="rec-toggle">
+                <h2>No Clean Exits Available</h2>
+                <p class="rec-sub">All {total_servers} servers are DNSBL-listed or have elevated fraud scores. Consider trying different cities.</p>
+            </summary>
+        </details>"""
 
     # ── Group cities by country ──
     countries = defaultdict(list)
@@ -582,13 +582,22 @@ def generate_html(results, timestamp, history, trends, last_clean, proximity_ord
     border: 1px solid #166534; border-radius: 10px;
     padding: 1rem 1.2rem; margin-bottom: 1rem;
   }}
-  .recommended h2 {{ font-size: 1.05rem; color: var(--green); margin-bottom: .1rem; }}
+  .recommended h2 {{ font-size: 1.05rem; color: var(--green); margin-bottom: .1rem; display: inline; }}
   .recommended.warn {{
     background: linear-gradient(135deg, #1a0a0a 0%, #1f0d0d 100%);
     border-color: var(--red);
   }}
   .recommended.warn h2 {{ color: var(--red); }}
-  .rec-header {{ display: flex; justify-content: space-between; align-items: flex-start; }}
+  .rec-toggle {{
+    cursor: pointer; list-style: none; user-select: none;
+    display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap;
+  }}
+  .rec-toggle::-webkit-details-marker {{ display: none; }}
+  .rec-toggle::before {{
+    content: "\\25b6"; font-size: .6rem; color: var(--muted);
+    transition: transform .15s; flex-shrink: 0; margin-top: .2rem;
+  }}
+  .recommended[open] .rec-toggle::before {{ transform: rotate(90deg); }}
   .rec-sub {{ color: var(--muted); font-size: .8rem; margin-bottom: .7rem; }}
 
   /* ── Country sections ── */
@@ -772,6 +781,9 @@ function doSearch(query) {{
     const q = query.toLowerCase().trim();
     const noResults = document.getElementById('no-results');
     let anyVisible = false;
+    // Collapse recommended box when searching, restore when cleared
+    const rec = document.querySelector('details.recommended');
+    if (rec) rec.open = !q;
 
     document.querySelectorAll('details.country').forEach(country => {{
         const countryName = country.querySelector('.country-name').textContent.toLowerCase();
