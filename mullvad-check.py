@@ -211,11 +211,12 @@ def check_server(server_info):
 
 
 def get_verdict(listed, fraud):
-    effective_fraud = fraud if fraud >= 0 else 0
-    if listed and effective_fraud >= 50:
+    if listed and fraud >= 50:
         return "BURNED"
     if listed:
         return "RISKY"
+    if fraud < 0:
+        return "UNKNOWN"
     if fraud >= 50:
         return "ELEVATED"
     if fraud >= 25:
@@ -570,7 +571,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
             for vname, cnt in c["counts"].items():
                 country_counts[vname] += cnt
         country_badges = ""
-        for vname in ["CLEAN", "FAIR", "ELEVATED", "RISKY", "BURNED"]:
+        for vname in ["CLEAN", "FAIR", "ELEVATED", "RISKY", "BURNED", "UNKNOWN"]:
             cnt = country_counts.get(vname, 0)
             if cnt:
                 country_badges += f' <span class="badge {vname.lower()}">{cnt} {vname.lower()}</span>'
@@ -579,7 +580,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
         city_sections = ""
         for c in cities:
             badges = ""
-            for vname in ["CLEAN", "FAIR", "ELEVATED", "RISKY", "BURNED"]:
+            for vname in ["CLEAN", "FAIR", "ELEVATED", "RISKY", "BURNED", "UNKNOWN"]:
                 cnt = c["counts"].get(vname, 0)
                 if cnt:
                     badges += f' <span class="badge {vname.lower()}">{cnt} {vname.lower()}</span>'
@@ -835,6 +836,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
   .badge.risky {{ background: var(--yellow-dim); color: var(--yellow); }}
   .badge.elevated {{ background: var(--orange-dim); color: var(--orange); }}
   .badge.burned {{ background: var(--red-dim); color: var(--red); }}
+  .badge.unknown {{ background: #1c1c1e; color: var(--muted); }}
   .legend {{
     display: flex; gap: .8rem; margin-bottom: 1rem; flex-wrap: wrap;
     font-size: .78rem; color: var(--muted);
@@ -906,6 +908,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
   <span><span class="dot" style="background:var(--orange)"></span> Elevated</span>
   <span><span class="dot" style="background:var(--yellow)"></span> Risky</span>
   <span><span class="dot" style="background:var(--red)"></span> Burned</span>
+  <span><span class="dot" style="background:#6b7280"></span> Unknown</span>
   <span style="margin-left:.5rem">|</span>
   <span>Sparkline = last {min(len(history), 24)} checks</span>
 </div>
@@ -1374,7 +1377,7 @@ def generate_api_json(results, timestamp, trends, proximity_order, city_meta):
         "clean": total_clean,
         "usable": total_usable,
         "health_pct": health_pct,
-        "recommended": recommended[:10],
+        "recommended": recommended[:15],
         "servers": all_servers,
     }
 
