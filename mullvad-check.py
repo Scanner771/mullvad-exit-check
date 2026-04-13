@@ -634,6 +634,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
 <meta name="twitter:title" content="Mullvad Exit Reputation &mdash; {clean_pct:.0f}% usable">
 <meta name="twitter:description" content="{total_clean} clean, {total_fair} fair out of {total_servers} WireGuard exits. Updated {timestamp}.">
 <meta name="description" content="Live reputation dashboard for Mullvad VPN WireGuard exit servers. Checks DNSBLs, fraud scores, and threat intel every 30 minutes.">
+<link rel="alternate" type="application/atom+xml" title="Mullvad Exit Reputation Feed" href="feed.xml">
 <style>
   :root {{
     --bg: #09090b; --card: #111113; --card-hover: #18181b;
@@ -643,6 +644,16 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
     --orange: #f97316; --orange-dim: #431407;
     --red: #ef4444; --red-dim: #450a0a;
     --lime: #a3e635;
+    --code-bg: #222228;
+    --row-hover: rgba(255,255,255,.02);
+  }}
+  html.light {{
+    --bg: #f8f8fa; --card: #ffffff; --card-hover: #f0f0f2;
+    --border: #d4d4d8; --text: #18181b; --muted: #71717a;
+    --green-dim: #dcfce7; --yellow-dim: #fef3c7;
+    --orange-dim: #ffedd5; --red-dim: #fee2e2;
+    --code-bg: #e4e4e7;
+    --row-hover: rgba(0,0,0,.03);
   }}
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
   body {{
@@ -681,7 +692,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
   .export-btn:hover {{ border-color: var(--green); color: var(--green); }}
   .dist-label {{ color: var(--muted); font-size: .7rem; font-weight: 400; }}
   .feat-pill {{
-    background: #1e293b; color: #94a3b8; font-size: .6rem; font-weight: 500;
+    background: var(--green-dim); color: var(--muted); font-size: .6rem; font-weight: 500;
     padding: .05rem .3rem; border-radius: 3px; margin-left: .2rem;
     white-space: nowrap;
   }}
@@ -730,13 +741,12 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
   }}
   .search-no-results.visible {{ display: block; }}
   .recommended {{
-    background: linear-gradient(135deg, #0a1a0a 0%, #0d1f0d 100%);
-    border: 1px solid #166534; border-radius: 10px;
+    background: var(--green-dim); border: 1px solid var(--green); border-radius: 10px;
     padding: 1rem 1.2rem; margin-bottom: 1rem;
   }}
   .recommended h2 {{ font-size: 1.05rem; color: var(--green); margin-bottom: .1rem; display: inline; }}
   .recommended.warn {{
-    background: linear-gradient(135deg, #1a0a0a 0%, #1f0d0d 100%);
+    background: var(--red-dim);
     border-color: var(--red);
   }}
   .recommended.warn h2 {{ color: var(--red); }}
@@ -797,7 +807,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
   .city-name {{ min-width: 100px; }}
   .count {{ color: var(--muted); font-weight: 400; font-size: .82rem; }}
   .mini-bar {{
-    width: 50px; height: 4px; background: #27272a; border-radius: 2px;
+    width: 50px; height: 4px; background: var(--border); border-radius: 2px;
     overflow: hidden; flex-shrink: 0;
   }}
   .mini-fill {{ height: 100%; border-radius: 2px; transition: width .3s; }}
@@ -807,10 +817,10 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
     border-bottom: 1px solid var(--border); color: var(--muted);
     font-weight: 500; font-size: .75rem; text-transform: uppercase; letter-spacing: .04em;
   }}
-  td {{ padding: .3rem .5rem; border-bottom: 1px solid #1e1e1e; }}
+  td {{ padding: .3rem .5rem; border-bottom: 1px solid var(--border); }}
   tr:last-child td {{ border-bottom: none; }}
   code {{
-    background: #222228; padding: .1rem .4rem; border-radius: 3px;
+    background: var(--code-bg); padding: .1rem .4rem; border-radius: 3px;
     font-size: .78rem; font-family: 'JetBrains Mono', 'Fira Code', monospace;
   }}
   .mono {{ font-family: 'JetBrains Mono', monospace; text-align: center; }}
@@ -822,7 +832,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
     padding: .1rem .4rem; border-radius: 3px; letter-spacing: .03em;
   }}
   .rented-badge {{
-    background: #27272a; color: var(--muted); font-size: .68rem; font-weight: 500;
+    background: var(--border); color: var(--muted); font-size: .68rem; font-weight: 500;
     padding: .1rem .4rem; border-radius: 3px;
   }}
   .lc-cell {{ font-size: .72rem; color: var(--muted); }}
@@ -836,7 +846,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
   .badge.risky {{ background: var(--yellow-dim); color: var(--yellow); }}
   .badge.elevated {{ background: var(--orange-dim); color: var(--orange); }}
   .badge.burned {{ background: var(--red-dim); color: var(--red); }}
-  .badge.unknown {{ background: #1c1c1e; color: var(--muted); }}
+  .badge.unknown {{ background: var(--border); color: var(--muted); }}
   .legend {{
     display: flex; gap: .8rem; margin-bottom: 1rem; flex-wrap: wrap;
     font-size: .78rem; color: var(--muted);
@@ -849,7 +859,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
   .trend.up {{ color: var(--green); }}
   .trend.down {{ color: var(--red); }}
   .footer {{ color: var(--muted); font-size: .72rem; margin-top: 1.2rem; padding-top: .8rem; border-top: 1px solid var(--border); }}
-  tbody tr:hover, table tr:hover {{ background: rgba(255,255,255,.02); }}
+  tbody tr:hover, table tr:hover {{ background: var(--row-hover); }}
   body.filter-clean .verdict-risky,
   body.filter-clean .verdict-burned,
   body.filter-clean .verdict-elevated,
@@ -880,6 +890,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
     </div>
     <button class="export-btn" onclick="exportClean()" title="Download list of clean/usable server hostnames">Export .txt</button>
     <button class="export-btn" onclick="exportCSV()" title="Download full results as CSV">Export .csv</button>
+    <button class="export-btn" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme">Light</button>
 </div>
 
 <div class="filters">
@@ -923,7 +934,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
 
 <div class="footer">
     DNSBLs: {', '.join(n for _, n in DNSBLS)} | Fraud scoring: Scamalytics | Threat intel: Abusix, Honeypot, CBL, XBL<br>
-    Auto-refreshes every 30 minutes | <a href="https://github.com/Scanner771/mullvad-exit-check" class="footer-link">mullvad-exit-check</a>
+    Auto-refreshes every 30 minutes | <a href="feed.xml" class="footer-link">Atom feed</a> | <a href="https://github.com/Scanner771/mullvad-exit-check" class="footer-link">mullvad-exit-check</a>
 </div>
 
 <script>
@@ -1291,6 +1302,21 @@ function buildRecommended() {{
     if (sub) sub.innerHTML = `Top ${{top.length}} usable servers nearest to ${{regionLabel}}${{featNote}} &mdash; detected from your timezone`;
 }}
 
+// ── Theme toggle ──
+function toggleTheme() {{
+    const isLight = document.documentElement.classList.toggle('light');
+    localStorage.setItem('theme', isLight ? 'light' : 'dark');
+    document.getElementById('theme-toggle').textContent = isLight ? 'Dark' : 'Light';
+}}
+(function() {{
+    const saved = localStorage.getItem('theme');
+    if (saved === 'light' || (!saved && window.matchMedia('(prefers-color-scheme: light)').matches)) {{
+        document.documentElement.classList.add('light');
+        const btn = document.getElementById('theme-toggle');
+        if (btn) btn.textContent = 'Dark';
+    }}
+}})();
+
 // ── Permalink anchor ──
 function openAnchor() {{
     const hash = location.hash.replace('#', '');
@@ -1382,6 +1408,76 @@ def generate_api_json(results, timestamp, trends, proximity_order, city_meta):
     }
 
 
+# ── Atom feed ──────────────────────────────────────────────────────────────
+
+def generate_feed(results, timestamp, ts_iso, history, city_meta):
+    """Generate an Atom feed with health status entries."""
+    total = sum(len(v) for v in results.values())
+    clean = sum(1 for entries in results.values() for s in entries if s["verdict"] == "CLEAN")
+    fair = sum(1 for entries in results.values() for s in entries if s["verdict"] == "FAIR")
+    usable = clean + fair
+    health_pct = round(usable / total * 100, 1) if total else 0
+
+    # Build per-country summary for entry content
+    countries = defaultdict(lambda: {"total": 0, "clean": 0, "usable": 0})
+    for city_code, entries in results.items():
+        meta = city_meta.get(city_code, {"country_name": "Unknown"})
+        cn = meta["country_name"]
+        for s in entries:
+            countries[cn]["total"] += 1
+            if s["verdict"] == "CLEAN":
+                countries[cn]["clean"] += 1
+            if s["verdict"] in ("CLEAN", "FAIR"):
+                countries[cn]["usable"] += 1
+
+    country_lines = []
+    for cn in sorted(countries):
+        c = countries[cn]
+        pct = round(c["usable"] / c["total"] * 100) if c["total"] else 0
+        country_lines.append(f"  {cn}: {c['usable']}/{c['total']} usable ({pct}%)")
+
+    # Determine status label
+    if health_pct >= 60:
+        status = "Healthy"
+    elif health_pct >= 40:
+        status = "Degraded"
+    else:
+        status = "Poor"
+
+    # Check for significant changes vs previous snapshot
+    change_note = ""
+    if len(history) >= 2:
+        prev = history[-2]
+        prev_total = len(prev["servers"])
+        if prev_total:
+            prev_usable = sum(1 for v in prev["servers"].values() if v in ("CLEAN", "FAIR"))
+            prev_pct = round(prev_usable / prev_total * 100, 1)
+            diff = health_pct - prev_pct
+            if abs(diff) >= 3:
+                direction = "up" if diff > 0 else "down"
+                change_note = f"\nChange: {diff:+.1f}% ({direction} from {prev_pct}%)"
+
+    content = h(f"Overall: {health_pct}% usable ({usable}/{total} servers){change_note}\n\nBy country:\n" + "\n".join(country_lines))
+
+    entry_id = f"tag:scanner771.github.io,2026:mullvad-check/{ts_iso}"
+
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Mullvad Exit Reputation</title>
+  <subtitle>Live health status of Mullvad VPN WireGuard exit servers</subtitle>
+  <link href="https://scanner771.github.io/mullvad-exit-check/" rel="alternate"/>
+  <link href="https://scanner771.github.io/mullvad-exit-check/feed.xml" rel="self"/>
+  <id>tag:scanner771.github.io,2026:mullvad-check</id>
+  <updated>{ts_iso}</updated>
+  <entry>
+    <title>{status}: {health_pct}% usable — {clean} clean, {fair} fair / {total} servers</title>
+    <id>{entry_id}</id>
+    <updated>{ts_iso}</updated>
+    <content type="html"><![CDATA[<pre>{content}</pre>]]></content>
+  </entry>
+</feed>"""
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1402,6 +1498,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     output_file = output_dir / "mullvad-report.html"
     api_file = output_dir / "mullvad-api.json"
+    feed_file = output_dir / "feed.xml"
     history_file = output_dir / "mullvad-history.json"
 
     if cfg["proximity"]:
@@ -1465,8 +1562,12 @@ def main():
     api_data = generate_api_json(results, ts, trends, proximity_order, city_meta)
     api_file.write_text(json.dumps(api_data, indent=2))
 
+    feed_xml = generate_feed(results, ts, ts_iso, history, city_meta)
+    feed_file.write_text(feed_xml)
+
     print(f"\nReport: {output_file}")
     print(f"API:    {api_file}")
+    print(f"Feed:   {feed_file}")
     print(f"History: {len(history)} snapshots in {history_file}")
 
     for city_code, entries in sorted(results.items(), key=lambda x: city_meta.get(x[0], {}).get("name", x[0])):

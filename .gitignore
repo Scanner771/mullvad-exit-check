@@ -1,6 +1,7 @@
 mullvad-report.html
 mullvad-api.json
 mullvad-history.json
+feed.xml
 config.json
 public/
 __pycache__/
