@@ -1,5 +1,7 @@
 # mullvad-exit-check
 
+[![Check Mullvad Exits](https://github.com/Scanner771/mullvad-exit-check/actions/workflows/check.yml/badge.svg)](https://github.com/Scanner771/mullvad-exit-check/actions/workflows/check.yml)
+
 Scans Mullvad VPN WireGuard exit servers against DNSBLs, threat intelligence feeds, and fraud scoring databases. Generates an interactive HTML report showing which exits are clean and safe to use.
 
 **[View live report](https://scanner771.github.io/mullvad-exit-check/)** — checks every 30 minutes, always up to date.
@@ -127,6 +129,8 @@ Or with nginx, Caddy, etc. — just point at the directory containing `mullvad-r
 
 ### JSON API format
 
+The API includes summary stats, top 10 recommended servers, and the full server list:
+
 ```json
 {
     "updated": "2026-04-10 12:00 UTC",
@@ -145,24 +149,48 @@ Or with nginx, Caddy, etc. — just point at the directory containing `mullvad-r
             "owned": true,
             "provider": "",
             "trend": "stable",
-            "threats": 0
+            "threats": 0,
+            "dnsbl": [],
+            "features": ["DAITA", "SOCKS5"]
         }
-    ]
+    ],
+    "servers": [ ... ]
 }
 ```
 
 ## Report features
 
 - Health gauge showing overall % of usable exits
-- Recommended exits box sorted by your proximity preference
+- Recommended exits sorted by proximity to you (auto-detected from timezone)
 - Filter buttons: All / Clean only / Usable (clean + fair)
-- Collapsible city sections with mini progress bars
-- Per-server: fraud score, DNSBL status, threat intel hits, owned/rented badge
+- Feature filters: SOCKS5, DAITA, Multihop, IPv6, Mullvad-owned (with AND/OR toggle)
+- Collapsible country/city sections with mini progress bars
+- Per-server: fraud score, DNSBL status (with tooltips), threat intel hits, owned/rented badge
 - Sparkline history (last 24 checks)
 - Trend arrows (improving/degrading/stable)
 - Last-clean date for currently dirty servers
-- Mobile responsive
-- Dark theme
+- Click-to-copy hostnames
+- Permalink anchors: link directly to a country (`#gb`) or city (`#city-lon`)
+- Export as `.txt` (hostnames) or `.csv` (full dataset)
+- Dynamic favicon with health %
+- Mobile responsive, dark theme
+- OpenGraph meta tags for social sharing previews
+
+## Docker
+
+```bash
+# Build
+docker build -t mullvad-check .
+
+# Run once, output to ./public
+docker run --rm -v ./public:/data mullvad-check
+
+# Check specific cities
+docker run --rm -v ./public:/data mullvad-check --cities lon sto nyc
+
+# Run on a schedule with cron or systemd timer
+*/30 * * * * docker run --rm -v /var/www/mullvad:/data mullvad-check
+```
 
 ## Requirements
 

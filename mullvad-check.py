@@ -21,7 +21,7 @@ Config file (optional JSON):
     }
 """
 
-import json, socket, re, ssl, sys
+import json, socket, re, ssl, sys, time, threading
 import urllib.request
 from html import escape as h
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -41,6 +41,11 @@ DNSBLS = [
     ("bl.spamcop.net", "SpamCop"),
     ("dnsbl-1.uceprotect.net", "UCEPROTECT"),
 ]
+
+# Rate limiter for Scamalytics to avoid getting blocked
+_fraud_lock = threading.Lock()
+_fraud_last = 0.0
+FRAUD_MIN_INTERVAL = 0.3  # seconds between requests
 
 
 def country_flag(country_code):
@@ -124,11 +129,19 @@ def fetch_servers(city_filter=None):
 
 def check_dnsbl(ip, bl_host):
     rev = ".".join(reversed(ip.split(".")))
-    try:
-        socket.getaddrinfo(f"{rev}.{bl_host}", None, socket.AF_INET, socket.SOCK_STREAM, 0, socket.AI_NUMERICSERV)
-        return True
-    except socket.gaierror:
-        return False
+    for attempt in range(2):
+        try:
+            socket.getaddrinfo(f"{rev}.{bl_host}", None, socket.AF_INET, socket.SOCK_STREAM, 0, socket.AI_NUMERICSERV)
+            return True
+        except socket.gaierror as e:
+            # NXDOMAIN = not listed (normal). Retry on timeout/servfail.
+            if e.errno in (socket.EAI_NONAME, socket.EAI_NODATA, -2, -5, 8):
+                return False
+            if attempt == 0:
+                time.sleep(2)
+                continue
+            return False
+    return False
 
 
 def check_honeypot(ip):
@@ -152,6 +165,13 @@ def check_honeypot(ip):
 
 def check_fraud(ip):
     """Check IP fraud score via Scamalytics (free, no API key needed)."""
+    global _fraud_last
+    # Rate limit: wait between requests to avoid getting blocked
+    with _fraud_lock:
+        elapsed = time.monotonic() - _fraud_last
+        if elapsed < FRAUD_MIN_INTERVAL:
+            time.sleep(FRAUD_MIN_INTERVAL - elapsed)
+        _fraud_last = time.monotonic()
     try:
         req = urllib.request.Request(
             f"https://scamalytics.com/ip/{ip}",
@@ -342,6 +362,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
     total_clean = 0
     total_fair = 0
     all_servers = []
+    csv_data = []
 
     # Build per-city data
     city_data = {}
@@ -355,9 +376,16 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
         rows = []
 
         for s in entries:
+            DNSBL_TIPS = {
+                "Spamhaus": "Email spam &amp; botnet blacklist",
+                "SORBS": "Spam &amp; open relay blacklist",
+                "Barracuda": "Email reputation blacklist",
+                "SpamCop": "User-reported spam source list",
+                "UCEPROTECT": "Unsolicited email blacklist",
+            }
             v = s["verdict"]
             color = VERDICT_COLORS.get(v, "#6b7280")
-            dnsbl_str = ", ".join(s["dnsbl"]) if s["dnsbl"] else "None"
+            dnsbl_str = ", ".join(f'<span title="{DNSBL_TIPS.get(d, d)}">{d}</span>' for d in s["dnsbl"]) if s["dnsbl"] else "None"
             threat_list = s.get("threat", [])
             threat_str = ", ".join(threat_list) if threat_list else "None"
             threat_count = len(threat_list)
@@ -376,6 +404,14 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
                 total_clean += 1
             if v == "FAIR":
                 total_fair += 1
+            csv_data.append({
+                "h": hostname, "ip": s["ip"], "city": city_name,
+                "country": meta["country_name"], "fraud": fraud,
+                "dnsbl": "|".join(s["dnsbl"]) if s["dnsbl"] else "",
+                "threats": "|".join(threat_list) if threat_list else "",
+                "verdict": v, "owned": "yes" if owned else "no",
+                "provider": provider, "features": "|".join(features),
+            })
 
             trend_html = ""
             if trend == "improving":
@@ -550,8 +586,9 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
             pct = (c["usable"] / c["total"] * 100) if c["total"] else 0
             bar_color = "#22c55e" if pct >= 50 else "#f59e0b" if pct >= 20 else "#dc2626" if pct > 0 else "#333"
 
+            city_id = h(c['code'])
             city_sections += f"""
-            <details class="city">
+            <details class="city" id="city-{city_id}">
                 <summary>
                     <span class="city-name">{c['name']}</span>
                     <span class="count">{c['total']} servers</span>
@@ -564,8 +601,9 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
                 </table>
             </details>"""
 
+        country_id = h(cc.lower())
         sections += f"""
-        <details class="country" {"open" if len(cities) <= 3 else ""}>
+        <details class="country" id="country-{country_id}" {"open" if len(cities) <= 3 else ""}>
             <summary>
                 <span class="country-name">{country_flag_emoji} {country_name}</span>
                 <span class="count">{country_total} servers &middot; {len(cities)} {'city' if len(cities) == 1 else 'cities'}</span>
@@ -587,6 +625,14 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="1800">
 <title>Mullvad Exit Reputation &mdash; {clean_pct:.0f}% usable ({total_clean} clean/{total_servers})</title>
+<meta property="og:title" content="Mullvad Exit Reputation &mdash; {clean_pct:.0f}% usable">
+<meta property="og:description" content="{total_clean} clean, {total_fair} fair out of {total_servers} WireGuard exits. Updated every 30 minutes.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://scanner771.github.io/mullvad-exit-check/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Mullvad Exit Reputation &mdash; {clean_pct:.0f}% usable">
+<meta name="twitter:description" content="{total_clean} clean, {total_fair} fair out of {total_servers} WireGuard exits. Updated {timestamp}.">
+<meta name="description" content="Live reputation dashboard for Mullvad VPN WireGuard exit servers. Checks DNSBLs, fraud scores, and threat intel every 30 minutes.">
 <style>
   :root {{
     --bg: #09090b; --card: #111113; --card-hover: #18181b;
@@ -830,7 +876,8 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
         <div class="sub">Updated <time id="update-time" datetime="{ts_iso}">{timestamp}</time> <span id="relative-time" class="relative-time"></span>{history_note}</div>
         <div class="sub">{total_servers} servers across {len(city_data)} cities &mdash; {total_clean} clean, {total_fair} fair</div>
     </div>
-    <button class="export-btn" onclick="exportClean()" title="Download list of clean/usable server hostnames">Export clean list</button>
+    <button class="export-btn" onclick="exportClean()" title="Download list of clean/usable server hostnames">Export .txt</button>
+    <button class="export-btn" onclick="exportCSV()" title="Download full results as CSV">Export .csv</button>
 </div>
 
 <div class="filters">
@@ -869,6 +916,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
 <div class="copy-toast" id="copy-toast">Copied!</div>
 <script id="export-data" type="application/json">{json.dumps(export_hostnames)}</script>
 <script id="rec-data" type="application/json">{json.dumps(rec_data)}</script>
+<script id="csv-data" type="application/json">{json.dumps(csv_data)}</script>
 
 <div class="footer">
     DNSBLs: {', '.join(n for _, n in DNSBLS)} | Fraud scoring: Scamalytics | Threat intel: Abusix, Honeypot, CBL, XBL<br>
@@ -1025,6 +1073,26 @@ function exportClean() {{
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = 'mullvad-clean-exits.txt';
+    a.click();
+    URL.revokeObjectURL(a.href);
+}}
+
+// ── Export CSV ──
+function exportCSV() {{
+    const data = JSON.parse(document.getElementById('csv-data').textContent);
+    if (!data.length) {{ alert('No data to export.'); return; }}
+    const cols = ['hostname','ip','city','country','fraud','dnsbl','threats','verdict','owned','provider','features'];
+    const header = cols.join(',');
+    const rows = data.map(r => cols.map(c => {{
+        const key = c === 'hostname' ? 'h' : c;
+        const val = String(r[key] ?? '');
+        return val.includes(',') || val.includes('"') ? '"' + val.replace(/"/g, '""') + '"' : val;
+    }}).join(','));
+    const csv = header + '\\n' + rows.join('\\n') + '\\n';
+    const blob = new Blob([csv], {{type: 'text/csv'}});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'mullvad-exit-reputation.csv';
     a.click();
     URL.revokeObjectURL(a.href);
 }}
@@ -1220,12 +1288,29 @@ function buildRecommended() {{
     if (sub) sub.innerHTML = `Top ${{top.length}} usable servers nearest to ${{regionLabel}}${{featNote}} &mdash; detected from your timezone`;
 }}
 
+// ── Permalink anchor ──
+function openAnchor() {{
+    const hash = location.hash.replace('#', '');
+    if (!hash) return;
+    // Try country-XX or city-xxx
+    const el = document.getElementById('country-' + hash) || document.getElementById('city-' + hash);
+    if (el) {{
+        el.open = true;
+        // Also open parent country if it's a city
+        const parent = el.closest('details.country');
+        if (parent) parent.open = true;
+        el.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+    }}
+}}
+
 // ── Init ──
 localizeTime();
 updateRelativeTime();
 setFavicon();
 buildRecommended();
+openAnchor();
 setInterval(updateRelativeTime, 60000);
+window.addEventListener('hashchange', openAnchor);
 </script>
 </body>
 </html>"""
@@ -1234,12 +1319,13 @@ setInterval(updateRelativeTime, 60000);
 # ── JSON API ────────────────────────────────────────────────────────────────
 
 def generate_api_json(results, timestamp, trends, proximity_order, city_meta):
-    """Generate a compact JSON summary."""
+    """Generate JSON API with summary + all servers."""
     VERDICT_ORDER = {"CLEAN": 0, "FAIR": 1, "ELEVATED": 2, "RISKY": 3, "BURNED": 4, "UNKNOWN": 5}
 
     total = 0
     total_clean = 0
     total_usable = 0
+    all_servers = []
     recommended = []
 
     for city_code, entries in results.items():
@@ -1255,24 +1341,31 @@ def generate_api_json(results, timestamp, trends, proximity_order, city_meta):
                 total_clean += 1
             if v in ("CLEAN", "FAIR"):
                 total_usable += 1
-                trend = trends.get(s["hostname"], "stable")
-                recommended.append({
-                    "rank": prox,
-                    "vo": VERDICT_ORDER.get(v, 5),
-                    "hostname": s["hostname"],
-                    "ip": s["ip"],
-                    "city": city_name,
-                    "country": cc,
-                    "fraud": s["fraud"],
-                    "verdict": v,
-                    "owned": s.get("owned", False),
-                    "provider": s.get("provider", ""),
-                    "trend": trend,
-                    "threats": len(s.get("threat", [])),
-                    "features": s.get("features", []),
-                })
+            trend = trends.get(s["hostname"], "stable")
+            server_entry = {
+                "hostname": s["hostname"],
+                "ip": s["ip"],
+                "city": city_name,
+                "city_code": city_code,
+                "country": cc,
+                "fraud": s["fraud"],
+                "verdict": v,
+                "owned": s.get("owned", False),
+                "provider": s.get("provider", ""),
+                "trend": trend,
+                "threats": len(s.get("threat", [])),
+                "dnsbl": s.get("dnsbl", []),
+                "features": s.get("features", []),
+            }
+            all_servers.append(server_entry)
+            if v in ("CLEAN", "FAIR"):
+                recommended.append({"rank": prox, "vo": VERDICT_ORDER.get(v, 5), **server_entry})
 
     recommended.sort(key=lambda s: (s["rank"], s["vo"], s["fraud"]))
+    # Strip sort keys from recommended output
+    for r in recommended:
+        r.pop("rank", None)
+        r.pop("vo", None)
     health_pct = round((total_usable / total * 100), 1) if total else 0
 
     return {
@@ -1282,6 +1375,7 @@ def generate_api_json(results, timestamp, trends, proximity_order, city_meta):
         "usable": total_usable,
         "health_pct": health_pct,
         "recommended": recommended[:10],
+        "servers": all_servers,
     }
 
 
