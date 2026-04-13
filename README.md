@@ -124,7 +124,8 @@ Or with nginx, Caddy, etc. — just point at the directory containing `mullvad-r
 | File | Description |
 |------|-------------|
 | `mullvad-report.html` | Interactive HTML report with filters, sparklines, and health gauge |
-| `mullvad-api.json` | JSON API with top 10 recommended servers and health stats |
+| `mullvad-api.json` | JSON API with all servers, top 15 recommended, and health stats |
+| `feed.xml` | Atom feed with health status (subscribe in any RSS reader) |
 | `mullvad-history.json` | Rolling history for trend computation (not human-readable) |
 
 ### JSON API format
