@@ -215,8 +215,6 @@ def get_verdict(listed, fraud):
         return "BURNED"
     if listed:
         return "RISKY"
-    if fraud < 0:
-        return "UNKNOWN"
     if fraud >= 50:
         return "ELEVATED"
     if fraud >= 25:
