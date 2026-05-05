@@ -21,19 +21,19 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
       - name: Restore history cache
-        uses: actions/cache@v4
+        id: history-cache
+        uses: actions/cache/restore@v5
         with:
           path: public/mullvad-history.json
           key: mullvad-history-${{ github.run_id }}
           restore-keys: mullvad-history-
-          save-always: true
 
       - name: Run reputation check
         run: |
@@ -45,8 +45,15 @@ jobs:
           python3 mullvad-check.py --output-dir public
           cp public/mullvad-report.html public/index.html
 
+      - name: Save history cache
+        if: always()
+        uses: actions/cache/save@v5
+        with:
+          path: public/mullvad-history.json
+          key: mullvad-history-${{ github.run_id }}
+
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: public
 
@@ -59,7 +66,7 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
   cleanup:
     needs: deploy
