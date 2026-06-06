@@ -25,25 +25,40 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.13'
 
-      - name: Restore history cache
-        uses: actions/cache@v4
+      - name: Restore history + fraud cache
+        id: cache-restore
+        uses: actions/cache/restore@v4
         with:
-          path: public/mullvad-history.json
+          path: |
+            public/mullvad-history.json
+            public/mullvad-fraud-cache.json
           key: mullvad-history-${{ github.run_id }}
           restore-keys: mullvad-history-
-          save-always: true
 
       - name: Run reputation check
+        env:
+          ABUSEIPDB_API_KEY: ${{ secrets.ABUSEIPDB_API_KEY }}
         run: |
           mkdir -p public
-          # Restore cached history into output dir
           if [ -f public/mullvad-history.json ]; then
             echo "Restored $(wc -c < public/mullvad-history.json) bytes of history"
           fi
+          if [ -f public/mullvad-fraud-cache.json ]; then
+            echo "Restored $(wc -c < public/mullvad-fraud-cache.json) bytes of fraud cache"
+          fi
           python3 mullvad-check.py --output-dir public
           cp public/mullvad-report.html public/index.html
+
+      - name: Save history + fraud cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            public/mullvad-history.json
+            public/mullvad-fraud-cache.json
+          key: mullvad-history-${{ github.run_id }}
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
