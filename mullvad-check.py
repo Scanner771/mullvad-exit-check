@@ -1464,7 +1464,7 @@ function buildRecommended() {{
             <td>${{s.flag}} ${{s.city}}${{distLabel}}</td>
             <td>${{owner}}</td>
             <td style="white-space:nowrap">${{feats}}</td>
-            <td class="mono">${{s.fraud}}</td>
+            <td class="mono">${{s.fraud >= 0 ? s.fraud : '?'}}</td>
             <td class="mono">${{threat}}</td>
             <td style="color:${{color}};font-weight:700">${{s.v}}</td>
         </tr>`;
