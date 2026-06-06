@@ -2,7 +2,7 @@
 
 [![Check Mullvad Exits](https://github.com/Scanner771/mullvad-exit-check/actions/workflows/check.yml/badge.svg)](https://github.com/Scanner771/mullvad-exit-check/actions/workflows/check.yml)
 
-Scans Mullvad VPN WireGuard exit servers against DNSBLs, threat intelligence feeds, and fraud scoring databases. Generates an interactive HTML report showing which exits are clean and safe to use.
+Scans Mullvad VPN WireGuard exit servers against DNSBLs, threat intelligence feeds, and the AbuseIPDB abuse-confidence database. Generates an interactive HTML report showing which exits are clean and safe to use.
 
 **[View live report](https://scanner771.github.io/mullvad-exit-check/)** — checks every 30 minutes, always up to date.
 
@@ -15,16 +15,18 @@ Mullvad exit IPs get burned by Cloudflare and other services regularly. You'll h
 | Source | Type | Impact on verdict |
 |--------|------|-------------------|
 | Spamhaus, SORBS, Barracuda, SpamCop, UCEPROTECT | DNSBL | Direct (RISKY/BURNED) |
-| Scamalytics | Fraud score | Direct (FAIR/ELEVATED) |
+| AbuseIPDB | Abuse confidence (0–100) | Direct (FAIR/ELEVATED) — requires `ABUSEIPDB_API_KEY` |
 | Abusix, Project Honeypot, CBL, XBL | Threat intel | Informational only |
 
 ### Verdict scale
 
-- **CLEAN** - No DNSBL listings, low fraud score
-- **FAIR** - No DNSBL listings, moderate fraud score (25-49)
-- **ELEVATED** - No DNSBL listings, high fraud score (50+)
+- **CLEAN** - No DNSBL listings, low confidence (<25)
+- **FAIR** - No DNSBL listings, moderate confidence (25-49)
+- **ELEVATED** - No DNSBL listings, high confidence (50+)
 - **RISKY** - DNSBL listed
-- **BURNED** - DNSBL listed + high fraud score
+- **BURNED** - DNSBL listed + high confidence
+
+> Without an AbuseIPDB key, the fraud column is empty and the verdict reduces to **CLEAN** (no DNSBL hits) or **RISKY** (one or more hits). The HTML header shows a "DISABLED" pill for AbuseIPDB so this is visible. When a data source starts failing the same pill flips to "DEGRADED" or "DOWN" — so silent regressions stop being silent.
 
 ## Quick start
 
@@ -32,6 +34,10 @@ Mullvad exit IPs get burned by Cloudflare and other services regularly. You'll h
 # No dependencies beyond Python 3.7+ (stdlib only)
 git clone https://github.com/Scanner771/mullvad-exit-check.git
 cd mullvad-exit-check
+
+# Optional: enable AbuseIPDB fraud lookups (free tier = 1000/day,
+# results are cached 24h per IP so the script naturally fits the limit)
+export ABUSEIPDB_API_KEY="your-key-from-abuseipdb.com"
 
 # Check all cities (takes 2-5 minutes depending on server count)
 python3 mullvad-check.py
@@ -124,9 +130,10 @@ Or with nginx, Caddy, etc. — just point at the directory containing `mullvad-r
 | File | Description |
 |------|-------------|
 | `mullvad-report.html` | Interactive HTML report with filters, sparklines, and health gauge |
-| `mullvad-api.json` | JSON API with all servers, top 15 recommended, and health stats |
+| `mullvad-api.json` | JSON API with all servers, top 15 recommended, health stats, and per-source health |
 | `feed.xml` | Atom feed with health status (subscribe in any RSS reader) |
 | `mullvad-history.json` | Rolling history for trend computation (not human-readable) |
+| `mullvad-fraud-cache.json` | Per-IP AbuseIPDB scores with 24h TTL (regenerated as needed) |
 
 ### JSON API format
 
@@ -155,13 +162,24 @@ The API includes summary stats, top 10 recommended servers, and the full server 
             "features": ["DAITA", "SOCKS5"]
         }
     ],
-    "servers": [ ... ]
+    "servers": [ ... ],
+    "sources": {
+        "groups": {
+            "DNSBLs":       {"ok": 2660, "fail": 0, "cached": 0, "skipped": 0, "status": "ok"},
+            "Threat intel": {"ok": 2128, "fail": 0, "cached": 0, "skipped": 0, "status": "ok"},
+            "AbuseIPDB":    {"ok": 22,   "fail": 0, "cached": 511, "skipped": 0, "status": "ok"}
+        },
+        "sources": { "dnsbl:zen.spamhaus.org": {...}, "abuseipdb": {...} }
+    }
 }
 ```
+
+The `sources` block surfaces silent regressions: status flips to `degraded` (≥50% failure) or `down` (≥90% failure), and the same status is rendered as a coloured pill in the HTML header. The workflow also emits a `::warning::` annotation when any group is degraded or down so it shows up in the Actions run summary.
 
 ## Report features
 
 - Health gauge showing overall % of usable exits
+- Per-source health pills (DNSBLs / Threat intel / AbuseIPDB) so a broken data source is visible at a glance
 - Recommended exits sorted by proximity to you (auto-detected from timezone)
 - Filter buttons: All / Clean only / Usable (clean + fair)
 - Feature filters: SOCKS5, DAITA, Multihop, IPv6, Mullvad-owned (with AND/OR toggle)
@@ -198,7 +216,11 @@ docker run --rm -v ./public:/data mullvad-check --cities lon sto nyc
 - Python 3.7+
 - No external dependencies (stdlib only)
 - DNS resolution must work (for DNSBL lookups)
-- Outbound HTTPS to `api.mullvad.net` and `scamalytics.com`
+- Outbound HTTPS to `api.mullvad.net` and (optionally) `api.abuseipdb.com`
+
+### Running in CI
+
+The repo's GitHub Action runs every 30 min and publishes to GitHub Pages. To enable the AbuseIPDB lookups when forking, add `ABUSEIPDB_API_KEY` under **Settings → Secrets and variables → Actions → New repository secret**. Without it the workflow still runs but the fraud column stays empty — the source-health pill will read DISABLED so consumers know.
 
 ## License
 
