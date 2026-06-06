@@ -231,9 +231,13 @@ def check_fraud(ip):
     now = time.time()
     with _fraud_cache_lock:
         entry = _fraud_cache.get(ip)
-        if entry and (now - entry.get("ts", 0)) < FRAUD_TTL_SECONDS:
-            _record_source("abuseipdb", "cached")
-            return int(entry.get("score", -1))
+        if entry:
+            # Per-entry TTL: success entries use FRAUD_TTL_SECONDS, failure entries
+            # carry a shorter ttl so we back off without re-burning quota every run.
+            ttl = entry.get("ttl", FRAUD_TTL_SECONDS)
+            if (now - entry.get("ts", 0)) < ttl:
+                _record_source("abuseipdb", "cached")
+                return int(entry.get("score", -1))
     with _fraud_lock:
         elapsed = time.monotonic() - _fraud_last
         if elapsed < FRAUD_MIN_INTERVAL:
@@ -255,11 +259,21 @@ def check_fraud(ip):
             _fraud_cache[ip] = {"score": score, "ts": now}
         _record_source("abuseipdb", "ok")
         return score
-    except urllib.error.HTTPError:
-        # 429 = daily quota exhausted; 401/403 = bad key. Either way, surface in source-health.
+    except urllib.error.HTTPError as e:
+        # 429 = daily quota exhausted; 401/403 = bad key; 5xx = upstream sick.
+        # Cache the failure briefly so we don't re-burn quota on every run —
+        # otherwise a single quota-exhaust cascades for the rest of the day.
+        # Longer back-off on 429 since quota resets at UTC midnight; shorter
+        # back-off on other errors so transient blips recover quickly.
+        failure_ttl = 6 * 3600 if e.code == 429 else 1800
+        with _fraud_cache_lock:
+            _fraud_cache[ip] = {"score": -1, "ts": now, "ttl": failure_ttl}
         _record_source("abuseipdb", "fail")
         return -1
     except Exception:
+        # Network/timeout/parse errors — back off for 30 min before retry.
+        with _fraud_cache_lock:
+            _fraud_cache[ip] = {"score": -1, "ts": now, "ttl": 1800}
         _record_source("abuseipdb", "fail")
         return -1
 
