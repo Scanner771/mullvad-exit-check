@@ -3,13 +3,17 @@
 Mullvad Exit Reputation Checker
 
 Scans Mullvad WireGuard exit servers against DNSBLs, threat intel feeds,
-and fraud scoring to find which exits are clean and usable.
+and AbuseIPDB to find which exits are clean and usable.
 
 Generates an HTML report + JSON API file. Tracks history with sparklines.
 
 Usage:
     python3 mullvad-check.py                  # Check all cities
     python3 mullvad-check.py --config config.json  # Use custom config
+
+Set ABUSEIPDB_API_KEY in env to enable fraud-score lookups (optional,
+free tier = 1000/day; scores are cached per-IP for 24h to stay under).
+Without a key the verdict falls back to DNSBL-only.
 
 Config file (optional JSON):
     {
@@ -21,8 +25,8 @@ Config file (optional JSON):
     }
 """
 
-import json, socket, re, ssl, sys, time, threading
-import urllib.request
+import json, os, socket, sys, time, threading
+import urllib.request, urllib.error
 from html import escape as h
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -42,10 +46,47 @@ DNSBLS = [
     ("dnsbl-1.uceprotect.net", "UCEPROTECT"),
 ]
 
-# Rate limiter for Scamalytics to avoid getting blocked
+HONEYPOT_DNSBLS = [
+    ("combined.mail.abusix.zone", "Abusix"),
+    ("dnsbl.httpbl.org", "Honeypot"),
+    ("cbl.abuseat.org", "CBL"),
+    ("xbl.spamhaus.org", "XBL"),
+]
+
+# Rate limiter for AbuseIPDB (free tier = 1000/day; we space requests anyway)
 _fraud_lock = threading.Lock()
 _fraud_last = 0.0
 FRAUD_MIN_INTERVAL = 0.3  # seconds between requests
+FRAUD_TTL_SECONDS = 24 * 3600  # cache scores 24h to fit free tier
+
+# Set from env at startup; None = AbuseIPDB lookups disabled
+_abuseipdb_key = None
+
+# Fraud-score cache, persists to disk across runs
+_fraud_cache = {}
+_fraud_cache_lock = threading.Lock()
+
+# Per-source health counters: name -> {ok, fail, cached, skipped}
+_source_stats_lock = threading.Lock()
+_source_stats = defaultdict(lambda: {"ok": 0, "fail": 0, "cached": 0, "skipped": 0})
+
+
+def _record_source(name, outcome):
+    with _source_stats_lock:
+        _source_stats[name][outcome] += 1
+
+
+def load_fraud_cache(path):
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def save_fraud_cache(cache, path):
+    path.write_text(json.dumps(cache, separators=(",", ":")))
 
 
 def country_flag(country_code):
@@ -127,20 +168,34 @@ def fetch_servers(city_filter=None):
     return servers, city_meta
 
 
+# Errno values meaning "no record" (NXDOMAIN / NODATA) — clean negative answer.
+# Mixed sign because glibc/musl disagree on conventions.
+_DNSBL_NXDOMAIN_ERRNOS = {socket.EAI_NONAME, socket.EAI_NODATA, -2, -5, 2, 5, 8}
+# Errno values meaning "try again" — transient failure worth one retry.
+_DNSBL_RETRYABLE_ERRNOS = {
+    getattr(socket, "EAI_AGAIN", -3), -3, 3,
+    getattr(socket, "EAI_FAIL", -4), -4,
+}
+
+
 def check_dnsbl(ip, bl_host):
     rev = ".".join(reversed(ip.split(".")))
     for attempt in range(2):
         try:
             socket.getaddrinfo(f"{rev}.{bl_host}", None, socket.AF_INET, socket.SOCK_STREAM, 0, socket.AI_NUMERICSERV)
+            _record_source(f"dnsbl:{bl_host}", "ok")
             return True
         except socket.gaierror as e:
-            # NXDOMAIN = not listed (normal). Retry on timeout/servfail.
-            if e.errno in (socket.EAI_NONAME, socket.EAI_NODATA, -2, -5, 8):
+            # NXDOMAIN = not listed (normal).
+            if e.errno in _DNSBL_NXDOMAIN_ERRNOS:
+                _record_source(f"dnsbl:{bl_host}", "ok")
                 return False
-            if attempt == 0:
+            # Transient (EAI_AGAIN etc.) or unknown errno → retry once.
+            if attempt == 0 and (e.errno in _DNSBL_RETRYABLE_ERRNOS or e.errno is None):
                 time.sleep(2)
                 continue
-            return False
+            break
+    _record_source(f"dnsbl:{bl_host}", "fail")
     return False
 
 
@@ -148,25 +203,37 @@ def check_honeypot(ip):
     """Check threat intel DNSBLs (informational)."""
     rev = ".".join(reversed(ip.split(".")))
     results = {}
-    for bl, name in [
-        ("combined.mail.abusix.zone", "Abusix"),
-        ("dnsbl.httpbl.org", "Honeypot"),
-        ("cbl.abuseat.org", "CBL"),
-        ("xbl.spamhaus.org", "XBL"),
-    ]:
+    for bl, name in HONEYPOT_DNSBLS:
         try:
             socket.getaddrinfo(f"{rev}.{bl}", None, socket.AF_INET, socket.SOCK_STREAM, 0, socket.AI_NUMERICSERV)
+            _record_source(f"intel:{bl}", "ok")
             results[name] = True
-        except socket.gaierror:
+        except socket.gaierror as e:
+            if e.errno in _DNSBL_NXDOMAIN_ERRNOS:
+                _record_source(f"intel:{bl}", "ok")
+            else:
+                _record_source(f"intel:{bl}", "fail")
             results[name] = False
     return results
 
 
 
 def check_fraud(ip):
-    """Check IP fraud score via Scamalytics (free, no API key needed)."""
+    """Check IP abuse confidence via AbuseIPDB. Score 0-100 (higher = worse).
+
+    Returns -1 when no key is configured or the lookup fails. Per-IP scores
+    are cached for FRAUD_TTL_SECONDS so we stay under the 1000/day free tier.
+    """
     global _fraud_last
-    # Rate limit: wait between requests to avoid getting blocked
+    if not _abuseipdb_key:
+        _record_source("abuseipdb", "skipped")
+        return -1
+    now = time.time()
+    with _fraud_cache_lock:
+        entry = _fraud_cache.get(ip)
+        if entry and (now - entry.get("ts", 0)) < FRAUD_TTL_SECONDS:
+            _record_source("abuseipdb", "cached")
+            return int(entry.get("score", -1))
     with _fraud_lock:
         elapsed = time.monotonic() - _fraud_last
         if elapsed < FRAUD_MIN_INTERVAL:
@@ -174,15 +241,26 @@ def check_fraud(ip):
         _fraud_last = time.monotonic()
     try:
         req = urllib.request.Request(
-            f"https://scamalytics.com/ip/{ip}",
-            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"},
+            f"https://api.abuseipdb.com/api/v2/check?ipAddress={ip}&maxAgeInDays=90",
+            headers={
+                "Key": _abuseipdb_key,
+                "Accept": "application/json",
+                "User-Agent": "mullvad-exit-check/1.0",
+            },
         )
-        ctx = ssl.create_default_context()
-        with urllib.request.urlopen(req, timeout=12, context=ctx) as resp:
-            html = resp.read().decode()
-            m = re.search(r"Fraud Score:\s*(\d+)", html)
-            return int(m.group(1)) if m else -1
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            payload = json.load(resp)
+        score = int(payload.get("data", {}).get("abuseConfidenceScore", -1))
+        with _fraud_cache_lock:
+            _fraud_cache[ip] = {"score": score, "ts": now}
+        _record_source("abuseipdb", "ok")
+        return score
+    except urllib.error.HTTPError:
+        # 429 = daily quota exhausted; 401/403 = bad key. Either way, surface in source-health.
+        _record_source("abuseipdb", "fail")
+        return -1
     except Exception:
+        _record_source("abuseipdb", "fail")
         return -1
 
 
@@ -303,6 +381,57 @@ def compute_history_sparkline(history, hostname):
     return points
 
 
+# ── Source health ───────────────────────────────────────────────────────────
+
+# Friendly labels for the source-health badge, indexed by raw key prefix.
+SOURCE_GROUPS = [
+    ("dnsbl:", "DNSBLs"),
+    ("intel:", "Threat intel"),
+    ("abuseipdb", "AbuseIPDB"),
+]
+
+
+def summarize_sources():
+    """Roll up _source_stats into per-group + per-source summaries with status.
+
+    Status is one of: ok | degraded | down | disabled.
+    """
+    with _source_stats_lock:
+        raw = {k: dict(v) for k, v in _source_stats.items()}
+
+    def classify(stats):
+        attempts = stats["ok"] + stats["fail"]
+        if attempts == 0:
+            if stats["skipped"] > 0 and stats["cached"] == 0:
+                return "disabled"
+            if stats["cached"] > 0:
+                return "ok"
+            return "disabled"
+        fail_rate = stats["fail"] / attempts
+        if fail_rate >= 0.9:
+            return "down"
+        if fail_rate >= 0.5:
+            return "degraded"
+        return "ok"
+
+    sources = {}
+    for key, stats in raw.items():
+        sources[key] = {**stats, "status": classify(stats)}
+
+    groups = {}
+    for prefix, label in SOURCE_GROUPS:
+        members = [k for k in sources if k.startswith(prefix) or k == prefix]
+        if not members:
+            continue
+        agg = {"ok": 0, "fail": 0, "cached": 0, "skipped": 0}
+        for m in members:
+            for fld in agg:
+                agg[fld] += sources[m][fld]
+        groups[label] = {**agg, "status": classify(agg), "sources": members}
+
+    return {"groups": groups, "sources": sources}
+
+
 # ── HTML generation ─────────────────────────────────────────────────────────
 
 VERDICT_COLORS = {
@@ -354,7 +483,7 @@ def health_gauge(clean_pct):
     </svg>"""
 
 
-def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proximity_order, city_meta, prev_health_pct=None):
+def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proximity_order, city_meta, prev_health_pct=None, source_health=None):
     VERDICT_ORDER = {"CLEAN": 0, "FAIR": 1, "ELEVATED": 2, "RISKY": 3, "BURNED": 4, "UNKNOWN": 5}
 
     total_servers = 0
@@ -499,6 +628,32 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
             health_trend_html = f'<span class="health-trend down" title="{diff:.0f}% vs last check">&#9660; {diff:.0f}%</span>'
         else:
             health_trend_html = '<span class="health-trend stable" title="No change vs last check">&#9644; stable</span>'
+
+    # Source-health badges (DNSBLs / Threat intel / AbuseIPDB)
+    source_health_html = ""
+    if source_health and source_health.get("groups"):
+        pills = []
+        STATUS_LABELS = {
+            "ok": "OK",
+            "degraded": "DEGRADED",
+            "down": "DOWN",
+            "disabled": "DISABLED",
+        }
+        for label, g in source_health["groups"].items():
+            status = g["status"]
+            attempts = g["ok"] + g["fail"]
+            cached = g["cached"]
+            if status == "disabled":
+                tip = f"{label}: not configured"
+            else:
+                rate = (g["fail"] / attempts * 100) if attempts else 0
+                tip = f"{label}: {g['ok']}/{attempts} ok ({rate:.0f}% fail), {cached} cached"
+            pills.append(
+                f'<span class="src-pill {status}" title="{h(tip)}">'
+                f'<span class="src-dot"></span>{h(label)} · {STATUS_LABELS[status]}'
+                f'</span>'
+            )
+        source_health_html = '<div class="src-health" title="Data-source health">' + "".join(pills) + "</div>"
 
     # Build export list + recommended data as JSON for client-side sorting
     export_hostnames = [s[4] for s in sorted(all_servers, key=lambda s: (s[0], s[1], s[2]))]
@@ -857,6 +1012,24 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
   .trend.up {{ color: var(--green); }}
   .trend.down {{ color: var(--red); }}
   .footer {{ color: var(--muted); font-size: .72rem; margin-top: 1.2rem; padding-top: .8rem; border-top: 1px solid var(--border); }}
+  .src-health {{
+    display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .8rem;
+    font-size: .72rem;
+  }}
+  .src-pill {{
+    display: inline-flex; align-items: center; gap: .3rem;
+    padding: .15rem .5rem; border-radius: 999px;
+    background: var(--bg-elev, #1a1a1a); border: 1px solid var(--border);
+    color: var(--muted);
+  }}
+  .src-pill .src-dot {{ width: 6px; height: 6px; border-radius: 50%; display: inline-block; }}
+  .src-pill.ok .src-dot {{ background: var(--green); }}
+  .src-pill.degraded {{ color: var(--orange); border-color: var(--orange); }}
+  .src-pill.degraded .src-dot {{ background: var(--orange); }}
+  .src-pill.down {{ color: var(--red); border-color: var(--red); }}
+  .src-pill.down .src-dot {{ background: var(--red); }}
+  .src-pill.disabled {{ opacity: .65; }}
+  .src-pill.disabled .src-dot {{ background: var(--muted); }}
   tbody tr:hover, table tr:hover {{ background: var(--row-hover); }}
   body.filter-clean .verdict-risky,
   body.filter-clean .verdict-burned,
@@ -911,6 +1084,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
     <span id="feat-count" style="color:var(--muted);font-size:.78rem;margin-left:.3rem"></span>
 </div>
 
+{source_health_html}
 <div class="legend">
   <span><span class="dot" style="background:var(--green)"></span> Clean</span>
   <span><span class="dot" style="background:var(--lime)"></span> Fair</span>
@@ -931,7 +1105,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
 <script id="csv-data" type="application/json">{json.dumps(csv_data)}</script>
 
 <div class="footer">
-    DNSBLs: {', '.join(n for _, n in DNSBLS)} | Fraud scoring: Scamalytics | Threat intel: Abusix, Honeypot, CBL, XBL<br>
+    DNSBLs: {', '.join(n for _, n in DNSBLS)} | Fraud scoring: AbuseIPDB | Threat intel: Abusix, Honeypot, CBL, XBL<br>
     Auto-refreshes every 30 minutes | <a href="feed.xml" class="footer-link">Atom feed</a> | <a href="https://github.com/Scanner771/mullvad-exit-check" class="footer-link">mullvad-exit-check</a>
 </div>
 
@@ -1345,7 +1519,7 @@ window.addEventListener('hashchange', openAnchor);
 
 # ── JSON API ────────────────────────────────────────────────────────────────
 
-def generate_api_json(results, timestamp, trends, proximity_order, city_meta):
+def generate_api_json(results, timestamp, trends, proximity_order, city_meta, source_health=None):
     """Generate JSON API with summary + all servers."""
     VERDICT_ORDER = {"CLEAN": 0, "FAIR": 1, "ELEVATED": 2, "RISKY": 3, "BURNED": 4, "UNKNOWN": 5}
 
@@ -1395,7 +1569,7 @@ def generate_api_json(results, timestamp, trends, proximity_order, city_meta):
         r.pop("vo", None)
     health_pct = round((total_usable / total * 100), 1) if total else 0
 
-    return {
+    out = {
         "updated": timestamp,
         "total_servers": total,
         "clean": total_clean,
@@ -1404,6 +1578,9 @@ def generate_api_json(results, timestamp, trends, proximity_order, city_meta):
         "recommended": recommended[:15],
         "servers": all_servers,
     }
+    if source_health is not None:
+        out["sources"] = source_health
+    return out
 
 
 # ── Atom feed ──────────────────────────────────────────────────────────────
@@ -1498,6 +1675,20 @@ def main():
     api_file = output_dir / "mullvad-api.json"
     feed_file = output_dir / "feed.xml"
     history_file = output_dir / "mullvad-history.json"
+    fraud_cache_file = output_dir / "mullvad-fraud-cache.json"
+
+    # AbuseIPDB: opt-in via env. Missing key = fraud column populated as -1.
+    global _abuseipdb_key, _fraud_cache
+    _abuseipdb_key = os.environ.get("ABUSEIPDB_API_KEY", "").strip() or None
+    _fraud_cache = load_fraud_cache(fraud_cache_file)
+    if _abuseipdb_key:
+        fresh = sum(
+            1 for v in _fraud_cache.values()
+            if (time.time() - v.get("ts", 0)) < FRAUD_TTL_SECONDS
+        )
+        print(f"AbuseIPDB enabled, {fresh}/{len(_fraud_cache)} cached scores still fresh", flush=True)
+    else:
+        print("AbuseIPDB key not set (ABUSEIPDB_API_KEY) — fraud column will be empty", flush=True)
 
     if cfg["proximity"]:
         proximity_order = cfg["proximity"]
@@ -1554,25 +1745,44 @@ def main():
             prev_usable = sum(1 for v in prev_snap["servers"].values() if v in ("CLEAN", "FAIR"))
             prev_health_pct = prev_usable / prev_total * 100
 
-    html = generate_html(results, ts, ts_iso, history, trends, last_clean, proximity_order, city_meta, prev_health_pct)
+    source_health = summarize_sources()
+
+    html = generate_html(results, ts, ts_iso, history, trends, last_clean, proximity_order, city_meta, prev_health_pct, source_health=source_health)
     output_file.write_text(html)
 
-    api_data = generate_api_json(results, ts, trends, proximity_order, city_meta)
+    api_data = generate_api_json(results, ts, trends, proximity_order, city_meta, source_health=source_health)
     api_file.write_text(json.dumps(api_data, indent=2))
 
     feed_xml = generate_feed(results, ts, ts_iso, history, city_meta)
     feed_file.write_text(feed_xml)
 
+    # Persist fraud cache (24h TTL handled at read time; prune stale entries here)
+    cutoff = time.time() - FRAUD_TTL_SECONDS * 2  # keep one extra TTL window for grace
+    pruned = {ip: v for ip, v in _fraud_cache.items() if v.get("ts", 0) >= cutoff}
+    save_fraud_cache(pruned, fraud_cache_file)
+
     print(f"\nReport: {output_file}")
     print(f"API:    {api_file}")
     print(f"Feed:   {feed_file}")
     print(f"History: {len(history)} snapshots in {history_file}")
+    print(f"Fraud cache: {len(pruned)} entries in {fraud_cache_file}")
 
     for city_code, entries in sorted(results.items(), key=lambda x: city_meta.get(x[0], {}).get("name", x[0])):
         name = city_meta.get(city_code, {}).get("name", city_code)
         clean = sum(1 for s in entries if s["verdict"] == "CLEAN")
         usable = sum(1 for s in entries if s["verdict"] in ("CLEAN", "FAIR"))
         print(f"  {name}: {clean} clean, {usable} usable / {len(entries)}")
+
+    # Emit GitHub Actions warnings for any degraded/down data sources so silent regressions surface.
+    in_actions = os.environ.get("GITHUB_ACTIONS") == "true"
+    for label, g in source_health.get("groups", {}).items():
+        if g["status"] in ("degraded", "down"):
+            attempts = g["ok"] + g["fail"]
+            msg = f"{label} {g['status'].upper()}: {g['fail']}/{attempts} requests failed"
+            if in_actions:
+                print(f"::warning title=Source {label}::{msg}")
+            else:
+                print(f"WARNING: {msg}", file=sys.stderr)
 
 
 if __name__ == "__main__":
