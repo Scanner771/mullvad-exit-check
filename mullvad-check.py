@@ -38,18 +38,19 @@ from collections import defaultdict
 DEFAULT_MAX_WORKERS = 10
 DEFAULT_MAX_HISTORY = 336  # 7 days at 30min intervals
 
+# SORBS removed 2026-07: shut down by Proofpoint mid-2024, NXDOMAIN even for
+# the 127.0.0.2 test record — it silently reported every IP as clean.
 DNSBLS = [
     ("zen.spamhaus.org", "Spamhaus"),
-    ("dnsbl.sorbs.net", "SORBS"),
     ("b.barracudacentral.org", "Barracuda"),
     ("bl.spamcop.net", "SpamCop"),
     ("dnsbl-1.uceprotect.net", "UCEPROTECT"),
 ]
 
+# Abusix + http:BL removed 2026-07: both require an API-key query prefix and
+# were silent no-ops without one. cbl.abuseat.org removed: retired, now an
+# alias of Spamhaus XBL which is queried directly below.
 HONEYPOT_DNSBLS = [
-    ("combined.mail.abusix.zone", "Abusix"),
-    ("dnsbl.httpbl.org", "Honeypot"),
-    ("cbl.abuseat.org", "CBL"),
     ("xbl.spamhaus.org", "XBL"),
 ]
 
@@ -178,13 +179,37 @@ _DNSBL_RETRYABLE_ERRNOS = {
 }
 
 
+def _classify_dnsbl_answer(addrs):
+    """Interpret the A records a DNSBL returned for a query.
+
+    Real listings answer inside 127.0.0.0/8 (typically 127.0.0.2-127.0.0.x).
+    Spamhaus signals "query refused" — public/open resolver, missing DQS key,
+    rate limit — with codes in 127.255.255.0/24 (.252 typing error, .254 open
+    resolver, .255 excessive queries): that means the SOURCE is unusable from
+    this vantage point, not that the IP is listed. This is exactly what
+    happens on GitHub Actions runners (Azure DNS) and once marked all 539
+    Mullvad exits as Spamhaus-listed. Anything outside 127.0.0.0/8 is a
+    wildcarded/parked domain hijacking the query.
+    """
+    if any(not a.startswith("127.") for a in addrs):
+        return "hijack"
+    if any(a.startswith("127.255.255.") for a in addrs):
+        return "refused"
+    return "listed"
+
+
 def check_dnsbl(ip, bl_host):
     rev = ".".join(reversed(ip.split(".")))
     for attempt in range(2):
         try:
-            socket.getaddrinfo(f"{rev}.{bl_host}", None, socket.AF_INET, socket.SOCK_STREAM, 0, socket.AI_NUMERICSERV)
-            _record_source(f"dnsbl:{bl_host}", "ok")
-            return True
+            infos = socket.getaddrinfo(f"{rev}.{bl_host}", None, socket.AF_INET, socket.SOCK_STREAM, 0, socket.AI_NUMERICSERV)
+            kind = _classify_dnsbl_answer({ai[4][0] for ai in infos})
+            if kind == "listed":
+                _record_source(f"dnsbl:{bl_host}", "ok")
+                return True
+            # refused/hijack = source broken from here, not a listing
+            _record_source(f"dnsbl:{bl_host}", "fail")
+            return False
         except socket.gaierror as e:
             # NXDOMAIN = not listed (normal).
             if e.errno in _DNSBL_NXDOMAIN_ERRNOS:
@@ -205,9 +230,10 @@ def check_honeypot(ip):
     results = {}
     for bl, name in HONEYPOT_DNSBLS:
         try:
-            socket.getaddrinfo(f"{rev}.{bl}", None, socket.AF_INET, socket.SOCK_STREAM, 0, socket.AI_NUMERICSERV)
-            _record_source(f"intel:{bl}", "ok")
-            results[name] = True
+            infos = socket.getaddrinfo(f"{rev}.{bl}", None, socket.AF_INET, socket.SOCK_STREAM, 0, socket.AI_NUMERICSERV)
+            kind = _classify_dnsbl_answer({ai[4][0] for ai in infos})
+            _record_source(f"intel:{bl}", "ok" if kind == "listed" else "fail")
+            results[name] = kind == "listed"
         except socket.gaierror as e:
             if e.errno in _DNSBL_NXDOMAIN_ERRNOS:
                 _record_source(f"intel:{bl}", "ok")
@@ -520,7 +546,6 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
         for s in entries:
             DNSBL_TIPS = {
                 "Spamhaus": "Email spam &amp; botnet blacklist",
-                "SORBS": "Spam &amp; open relay blacklist",
                 "Barracuda": "Email reputation blacklist",
                 "SpamCop": "User-reported spam source list",
                 "UCEPROTECT": "Unsolicited email blacklist",
@@ -1119,7 +1144,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
 <script id="csv-data" type="application/json">{json.dumps(csv_data)}</script>
 
 <div class="footer">
-    DNSBLs: {', '.join(n for _, n in DNSBLS)} | Fraud scoring: AbuseIPDB | Threat intel: Abusix, Honeypot, CBL, XBL<br>
+    DNSBLs: {', '.join(n for _, n in DNSBLS)} | Fraud scoring: AbuseIPDB | Threat intel: {', '.join(n for _, n in HONEYPOT_DNSBLS)}<br>
     Auto-refreshes every 30 minutes | <a href="feed.xml" class="footer-link">Atom feed</a> | <a href="https://github.com/Scanner771/mullvad-exit-check" class="footer-link">mullvad-exit-check</a>
 </div>
 
@@ -1741,6 +1766,32 @@ def main():
             done += 1
             if done % 10 == 0:
                 print(f"  {done}/{total}...", flush=True)
+
+    # Sanity guard: a blocklist flagging most of the fleet is a broken source
+    # (blocked resolver, wildcarded/parked domain), not evidence that every
+    # Mullvad exit went dirty at once. Strip its hits, recompute verdicts, and
+    # push its source-health to "down" so the dashboard shows the truth.
+    flat = [s for entries in results.values() for s in entries]
+    if flat:
+        name_to_host = {name: host for host, name in DNSBLS}
+        hit_counts = defaultdict(int)
+        for s in flat:
+            for bl_name in s["dnsbl"]:
+                hit_counts[bl_name] += 1
+        for bl_name, n in hit_counts.items():
+            if n <= len(flat) * 0.5:
+                continue
+            print(f"  WARNING: {bl_name} flagged {n}/{len(flat)} servers — treating source as broken, ignoring its hits", file=sys.stderr)
+            for s in flat:
+                if bl_name in s["dnsbl"]:
+                    s["dnsbl"].remove(bl_name)
+                    s["verdict"] = get_verdict(s["dnsbl"], s["fraud"])
+            host = name_to_host.get(bl_name)
+            if host:
+                with _source_stats_lock:
+                    st = _source_stats[f"dnsbl:{host}"]
+                    st["fail"] += st["ok"]
+                    st["ok"] = 0
 
     now_utc = datetime.now(timezone.utc)
     ts = now_utc.strftime("%Y-%m-%d %H:%M UTC")
