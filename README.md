@@ -14,9 +14,9 @@ Mullvad exit IPs get burned by Cloudflare and other services regularly. You'll h
 
 | Source | Type | Impact on verdict |
 |--------|------|-------------------|
-| Spamhaus, SORBS, Barracuda, SpamCop, UCEPROTECT | DNSBL | Direct (RISKY/BURNED) |
+| Spamhaus, Barracuda, SpamCop, UCEPROTECT | DNSBL | Direct (RISKY/BURNED) |
 | AbuseIPDB | Abuse confidence (0–100) | Direct (FAIR/ELEVATED) — requires `ABUSEIPDB_API_KEY` |
-| Abusix, Project Honeypot, CBL, XBL | Threat intel | Informational only |
+| Spamhaus XBL | Threat intel | Informational only |
 
 ### Verdict scale
 
