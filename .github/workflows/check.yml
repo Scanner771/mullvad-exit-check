@@ -80,6 +80,13 @@ jobs:
     needs: deploy
     runs-on: ubuntu-latest
     steps:
+      # GitHub auto-disables cron workflows after 60 days without repo
+      # activity; re-enabling via API from inside the run resets that clock.
+      - name: Keepalive (prevent 60-day cron auto-disable)
+        run: gh api -X PUT repos/${{ github.repository }}/actions/workflows/check.yml/enable
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Delete old workflow runs
         uses: Mattraks/delete-workflow-runs@b3018382ca039b53d238908238bd35d1fb14f8ee # v2
         with:
