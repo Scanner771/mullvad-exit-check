@@ -1,0 +1,15 @@
+version: 2
+
+# Every action in check.yml is pinned to a commit SHA for supply-chain safety.
+# A SHA pin never expires on its own, so without this the workflow silently
+# rots — the actions here had drifted 2-3 major versions behind before anyone
+# noticed. Dependabot opens a PR (with the new SHA and its version comment)
+# whenever an upstream release lands.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci

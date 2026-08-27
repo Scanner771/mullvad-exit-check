@@ -47,12 +47,33 @@ DNSBLS = [
     ("dnsbl-1.uceprotect.net", "UCEPROTECT"),
 ]
 
+# Spamhaus zen returns one A record per dataset the IP is listed in, so a hit
+# already carries the reason. Decoding beats reporting a bare "Spamhaus".
+# https://www.spamhaus.org/blocklists/zen-blocklist/
+ZEN_HOST = "zen.spamhaus.org"
+ZEN_CODES = {
+    "127.0.0.2": "SBL - manually listed abuse resource",
+    "127.0.0.3": "CSS - automated low-reputation SMTP emitter",
+    "127.0.0.4": "XBL/CBL - compromised or malware-infected host",
+    "127.0.0.5": "XBL/CBL - compromised or malware-infected host",
+    "127.0.0.6": "XBL/CBL - compromised or malware-infected host",
+    "127.0.0.7": "XBL/CBL - compromised or malware-infected host",
+    "127.0.0.9": "DROP - range assigned to a known rogue entity",
+    "127.0.0.10": "PBL - ISP declared this range should not send mail",
+    "127.0.0.11": "PBL - Spamhaus inferred this range should not send mail",
+    "127.0.0.30": "BCL - botnet command-and-control server",
+}
+_ZEN_XBL_CODES = {"127.0.0.4", "127.0.0.5", "127.0.0.6", "127.0.0.7"}
+
 # Abusix + http:BL removed 2026-07: both require an API-key query prefix and
-# were silent no-ops without one. cbl.abuseat.org removed: retired, now an
-# alias of Spamhaus XBL which is queried directly below.
-HONEYPOT_DNSBLS = [
-    ("xbl.spamhaus.org", "XBL"),
-]
+# were silent no-ops without one. cbl.abuseat.org removed: retired, alias of
+# Spamhaus XBL.
+# xbl.spamhaus.org removed 2026-08: Spamhaus documents that zen's subzones
+# (SBL/CSS/XBL/PBL) must NOT be queried separately when you already query zen —
+# it is 544 extra DNS lookups per run for an answer zen already gave us. XBL is
+# now derived from the zen return codes instead. List kept so another intel
+# source can be dropped in without restoring the plumbing.
+HONEYPOT_DNSBLS = []
 
 # Rate limiter for AbuseIPDB (free tier = 1000/day; we space requests anyway)
 _fraud_lock = threading.Lock()
@@ -199,29 +220,36 @@ def _classify_dnsbl_answer(addrs):
 
 
 def check_dnsbl(ip, bl_host):
+    """Query one DNSBL.
+
+    Returns the sorted 127.0.0.0/8 return codes when the IP is listed (always
+    non-empty, so it stays truthy for callers that only want a yes/no), and
+    None for every not-listed / broken-source outcome.
+    """
     rev = ".".join(reversed(ip.split(".")))
     for attempt in range(2):
         try:
             infos = socket.getaddrinfo(f"{rev}.{bl_host}", None, socket.AF_INET, socket.SOCK_STREAM, 0, socket.AI_NUMERICSERV)
-            kind = _classify_dnsbl_answer({ai[4][0] for ai in infos})
+            addrs = {ai[4][0] for ai in infos}
+            kind = _classify_dnsbl_answer(addrs)
             if kind == "listed":
                 _record_source(f"dnsbl:{bl_host}", "ok")
-                return True
+                return sorted(addrs)
             # refused/hijack = source broken from here, not a listing
             _record_source(f"dnsbl:{bl_host}", "fail")
-            return False
+            return None
         except socket.gaierror as e:
             # NXDOMAIN = not listed (normal).
             if e.errno in _DNSBL_NXDOMAIN_ERRNOS:
                 _record_source(f"dnsbl:{bl_host}", "ok")
-                return False
+                return None
             # Transient (EAI_AGAIN etc.) or unknown errno → retry once.
             if attempt == 0 and (e.errno in _DNSBL_RETRYABLE_ERRNOS or e.errno is None):
                 time.sleep(2)
                 continue
             break
     _record_source(f"dnsbl:{bl_host}", "fail")
-    return False
+    return None
 
 
 def check_honeypot(ip):
@@ -308,12 +336,24 @@ def check_server(server_info):
     ip = server_info["ip"]
     hostname = server_info["hostname"]
     listed_on = []
+    why = {}
+    zen_codes = set()
     for bl_host, bl_name in DNSBLS:
-        if check_dnsbl(ip, bl_host):
-            listed_on.append(bl_name)
+        codes = check_dnsbl(ip, bl_host)
+        if not codes:
+            continue
+        listed_on.append(bl_name)
+        if bl_host == ZEN_HOST:
+            zen_codes = set(codes)
+            reasons = [ZEN_CODES[c] for c in codes if c in ZEN_CODES]
+            if reasons:
+                why[bl_name] = reasons
     fraud = check_fraud(ip)
     threat_intel = check_honeypot(ip)
     extra_lists = [name for name, hit in threat_intel.items() if hit]
+    # XBL comes free with the zen answer — no separate query needed.
+    if zen_codes & _ZEN_XBL_CODES:
+        extra_lists.append("XBL")
     return {
         "hostname": hostname,
         "ip": ip,
@@ -322,6 +362,7 @@ def check_server(server_info):
         "speed": server_info.get("speed", 0),
         "features": server_info.get("features", []),
         "dnsbl": listed_on,
+        "dnsbl_why": why,
         "threat": extra_lists,
         "fraud": fraud,
         "verdict": get_verdict(listed_on, fraud),
@@ -552,7 +593,15 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
             }
             v = s["verdict"]
             color = VERDICT_COLORS.get(v, "#6b7280")
-            dnsbl_str = ", ".join(f'<span title="{DNSBL_TIPS.get(d, d)}">{d}</span>' for d in s["dnsbl"]) if s["dnsbl"] else "None"
+            why = s.get("dnsbl_why", {})
+
+            def _bl_tip(d, _why=why):
+                tip = DNSBL_TIPS.get(d, d)
+                # ZEN_CODES values are hardcoded ASCII, safe to inline; the
+                # DNSBL_TIPS values are already entity-escaped.
+                return f"{tip} &mdash; {'; '.join(h(r) for r in _why[d])}" if _why.get(d) else tip
+
+            dnsbl_str = ", ".join(f'<span class="bl-hit" title="{_bl_tip(d)}">{d}</span>' for d in s["dnsbl"]) if s["dnsbl"] else "None"
             threat_list = s.get("threat", [])
             threat_str = ", ".join(threat_list) if threat_list else "None"
             threat_count = len(threat_list)
@@ -575,6 +624,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
                 "h": hostname, "ip": s["ip"], "city": city_name,
                 "country": meta["country_name"], "fraud": fraud,
                 "dnsbl": "|".join(s["dnsbl"]) if s["dnsbl"] else "",
+                "dnsbl_why": "|".join(r for rs in why.values() for r in rs),
                 "threats": "|".join(threat_list) if threat_list else "",
                 "verdict": v, "owned": "yes" if owned else "no",
                 "provider": provider, "features": "|".join(features),
@@ -1039,6 +1089,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
   .badge.elevated {{ background: var(--orange-dim); color: var(--orange); }}
   .badge.burned {{ background: var(--red-dim); color: var(--red); }}
   .badge.unknown {{ background: var(--border); color: var(--muted); }}
+  .bl-hit {{ cursor: help; text-decoration: underline dotted currentColor; text-underline-offset: 2px; }}
   .legend {{
     display: flex; gap: .8rem; margin-bottom: 1rem; flex-wrap: wrap;
     font-size: .78rem; color: var(--muted);
@@ -1144,8 +1195,8 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
 <script id="csv-data" type="application/json">{json.dumps(csv_data)}</script>
 
 <div class="footer">
-    DNSBLs: {', '.join(n for _, n in DNSBLS)} | Fraud scoring: AbuseIPDB | Threat intel: {', '.join(n for _, n in HONEYPOT_DNSBLS)}<br>
-    Auto-refreshes every 30 minutes | <a href="feed.xml" class="footer-link">Atom feed</a> | <a href="https://github.com/Scanner771/mullvad-exit-check" class="footer-link">mullvad-exit-check</a>
+    DNSBLs: {', '.join(n for _, n in DNSBLS)} | Fraud scoring: AbuseIPDB | Threat intel: Spamhaus XBL (from zen return codes)<br>
+    Rechecked up to every 30 minutes (GitHub throttles scheduled runs, so gaps happen) | <a href="feed.xml" class="footer-link">Atom feed</a> | <a href="https://github.com/Scanner771/mullvad-exit-check" class="footer-link">mullvad-exit-check</a>
 </div>
 
 <script>
@@ -1306,7 +1357,7 @@ function exportClean() {{
 function exportCSV() {{
     const data = JSON.parse(document.getElementById('csv-data').textContent);
     if (!data.length) {{ alert('No data to export.'); return; }}
-    const cols = ['hostname','ip','city','country','fraud','dnsbl','threats','verdict','owned','provider','features'];
+    const cols = ['hostname','ip','city','country','fraud','dnsbl','dnsbl_why','threats','verdict','owned','provider','features'];
     const header = cols.join(',');
     const rows = data.map(r => cols.map(c => {{
         const key = c === 'hostname' ? 'h' : c;
@@ -1597,6 +1648,8 @@ def generate_api_json(results, timestamp, trends, proximity_order, city_meta, so
                 "dnsbl": s.get("dnsbl", []),
                 "features": s.get("features", []),
             }
+            if s.get("dnsbl_why"):
+                server_entry["dnsbl_why"] = s["dnsbl_why"]
             all_servers.append(server_entry)
             if v in ("CLEAN", "FAIR"):
                 recommended.append({"rank": prox, "vo": VERDICT_ORDER.get(v, 5), **server_entry})
@@ -1785,6 +1838,7 @@ def main():
             for s in flat:
                 if bl_name in s["dnsbl"]:
                     s["dnsbl"].remove(bl_name)
+                    s.get("dnsbl_why", {}).pop(bl_name, None)
                     s["verdict"] = get_verdict(s["dnsbl"], s["fraud"])
             host = name_to_host.get(bl_name)
             if host:
