@@ -8,6 +8,14 @@ Scans Mullvad VPN WireGuard exit servers against DNSBLs, threat intelligence fee
 
 > GitHub throttles scheduled workflows on public repos, so the real interval is closer to an hour and multi-hour gaps happen. The dashboard always shows the timestamp of the run you're looking at.
 
+## A note on Spamhaus PBL
+
+PBL is a *policy* listing: the ISP has declared that a range should not be sending email
+directly. That is true of nearly every VPN and hosting range, and it says nothing about
+whether an exit will get you a CAPTCHA — which is what this tool is for. PBL-only hits are
+displayed (greyed out, with a tooltip) but do not make a server RISKY. Real abuse listings
+(SBL, CSS, XBL/CBL, DROP, BCL) still do.
+
 ## Why?
 
 Mullvad exit IPs get burned by Cloudflare and other services regularly. You'll hit CAPTCHAs, blocks, or degraded service depending on which server you land on. This tool checks every exit so you know which ones are clean before connecting.
@@ -17,6 +25,7 @@ Mullvad exit IPs get burned by Cloudflare and other services regularly. You'll h
 | Source | Type | Impact on verdict |
 |--------|------|-------------------|
 | Spamhaus, Barracuda, SpamCop, UCEPROTECT | DNSBL | Direct (RISKY/BURNED) |
+| Spamhaus **PBL** | Mail policy | Shown, but **not** counted — see below |
 | AbuseIPDB | Abuse confidence (0–100) | Direct (FAIR/ELEVATED) — requires `ABUSEIPDB_API_KEY` |
 | Spamhaus XBL | Threat intel | Informational only — derived from the `zen` return codes, not a separate query |
 
