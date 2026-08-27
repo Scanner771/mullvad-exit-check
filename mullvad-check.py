@@ -25,6 +25,7 @@ Config file (optional JSON):
     }
 """
 
+import ipaddress
 import json, os, socket, sys, time, threading
 import urllib.request, urllib.error
 from html import escape as h
@@ -36,6 +37,7 @@ from collections import defaultdict
 # ── Config defaults ──────────────────────────────────────────────────────────
 
 DEFAULT_MAX_WORKERS = 10
+CHECK_IPV6 = True  # every Mullvad relay has an IPv6 address; config can disable
 DEFAULT_MAX_HISTORY = 336  # 7 days at 30min intervals
 
 # SORBS removed 2026-07: shut down by Proofpoint mid-2024, NXDOMAIN even for
@@ -69,6 +71,47 @@ _ZEN_XBL_CODES = {"127.0.0.4", "127.0.0.5", "127.0.0.6", "127.0.0.7"}
 # whether the exit is burned for browsing, which is what this tool measures.
 # A PBL-only hit is reported but does not make a server RISKY.
 _ZEN_POLICY_CODES = {"127.0.0.10", "127.0.0.11"}
+
+# Spamhaus ACLs its free public mirrors against open/public resolvers and answers
+# 127.255.255.254 instead of real data — from a resolver like Quad9 or a cloud
+# runner you can get refused answers for hours. A free DQS key moves the query to
+# a dedicated zone with no ACL and a 300k/day allowance. Set SPAMHAUS_DQS_KEY (or
+# spamhaus_dqs_key in config.json) and zen queries switch over automatically.
+# Key goes in the QUERY only — never in source names, the JSON API or the HTML.
+# https://www.spamhaus.com/free-trial/sign-up-for-a-free-data-query-service-account/
+DQS_ZONES = {"zen.spamhaus.org": "zen.dq.spamhaus.net"}
+_dqs_key = ""
+
+
+def query_zone(bl_host):
+    """The zone to actually query for a blocklist — DQS if a key is configured."""
+    if _dqs_key and bl_host in DQS_ZONES:
+        return f"{_dqs_key}.{DQS_ZONES[bl_host]}"
+    return bl_host
+
+
+def dqs_key_works():
+    """Prove a DQS key before trusting it.
+
+    A wrong or expired key does not error — the dedicated zone simply NXDOMAINs
+    every query, which reads as "everything is clean". That is the same silent
+    failure that made SORBS report a spotless fleet for months, so the key has
+    to answer the 127.0.0.2 test record before we rely on it.
+    """
+    try:
+        infos = socket.getaddrinfo(f"2.0.0.127.{query_zone(ZEN_HOST)}", None, socket.AF_INET,
+                                   socket.SOCK_STREAM, 0, socket.AI_NUMERICSERV)
+        return "127.0.0.2" in {ai[4][0] for ai in infos}
+    except socket.gaierror:
+        return False
+
+
+def reverse_nibbles(ip):
+    """Reverse an IP for a DNSBL query: octets for v4, nibbles for v6."""
+    addr = ipaddress.ip_address(ip)
+    if addr.version == 4:
+        return ".".join(reversed(ip.split(".")))
+    return ".".join(reversed(addr.packed.hex()))
 
 # Abusix + http:BL removed 2026-07: both require an API-key query prefix and
 # were silent no-ops without one. cbl.abuseat.org removed: retired, alias of
@@ -131,6 +174,8 @@ def load_config(config_path=None):
         "output_dir": None,  # None = script directory
         "max_workers": DEFAULT_MAX_WORKERS,
         "max_history": DEFAULT_MAX_HISTORY,
+        "check_ipv6": CHECK_IPV6,
+        "spamhaus_dqs_key": "",  # or set SPAMHAUS_DQS_KEY in the environment
     }
     if config_path:
         if not Path(config_path).exists():
@@ -187,6 +232,7 @@ def fetch_servers(city_filter=None):
         servers.setdefault(city, []).append({
             "hostname": s["hostname"],
             "ip": s["ipv4_addr_in"],
+            "ip6": s.get("ipv6_addr_in", ""),
             "owned": s.get("owned", False),
             "provider": s.get("provider", ""),
             "speed": speed,
@@ -231,10 +277,11 @@ def check_dnsbl(ip, bl_host):
     non-empty, so it stays truthy for callers that only want a yes/no), and
     None for every not-listed / broken-source outcome.
     """
-    rev = ".".join(reversed(ip.split(".")))
+    rev = reverse_nibbles(ip)
+    zone = query_zone(bl_host)
     for attempt in range(2):
         try:
-            infos = socket.getaddrinfo(f"{rev}.{bl_host}", None, socket.AF_INET, socket.SOCK_STREAM, 0, socket.AI_NUMERICSERV)
+            infos = socket.getaddrinfo(f"{rev}.{zone}", None, socket.AF_INET, socket.SOCK_STREAM, 0, socket.AI_NUMERICSERV)
             addrs = {ai[4][0] for ai in infos}
             kind = _classify_dnsbl_answer(addrs)
             if kind == "listed":
@@ -259,11 +306,11 @@ def check_dnsbl(ip, bl_host):
 
 def check_honeypot(ip):
     """Check threat intel DNSBLs (informational)."""
-    rev = ".".join(reversed(ip.split(".")))
+    rev = reverse_nibbles(ip)
     results = {}
     for bl, name in HONEYPOT_DNSBLS:
         try:
-            infos = socket.getaddrinfo(f"{rev}.{bl}", None, socket.AF_INET, socket.SOCK_STREAM, 0, socket.AI_NUMERICSERV)
+            infos = socket.getaddrinfo(f"{rev}.{query_zone(bl)}", None, socket.AF_INET, socket.SOCK_STREAM, 0, socket.AI_NUMERICSERV)
             kind = _classify_dnsbl_answer({ai[4][0] for ai in infos})
             _record_source(f"intel:{bl}", "ok" if kind == "listed" else "fail")
             results[name] = kind == "listed"
@@ -357,6 +404,22 @@ def check_server(server_info):
                 policy_on.append(bl_name)
                 continue
         listed_on.append(bl_name)
+    # Spamhaus is the only one of the four that answers IPv6 queries (verified
+    # against the ::ffff:7f00:9 test address; the other three NXDOMAIN it). A
+    # dirty v6 range still burns you on any dual-stack site, so it counts.
+    ip6 = server_info.get("ip6", "")
+    listed6 = []
+    if ip6 and CHECK_IPV6:
+        codes6 = check_dnsbl(ip6, ZEN_HOST)
+        if codes6:
+            reasons6 = [ZEN_CODES[c] for c in codes6 if c in ZEN_CODES]
+            if set(codes6) <= _ZEN_POLICY_CODES:
+                policy_on.append("Spamhaus/IPv6")
+            else:
+                listed6.append("Spamhaus/IPv6")
+                listed_on.append("Spamhaus/IPv6")
+            if reasons6:
+                why["Spamhaus/IPv6"] = reasons6
     fraud = check_fraud(ip)
     threat_intel = check_honeypot(ip)
     extra_lists = [name for name, hit in threat_intel.items() if hit]
@@ -370,7 +433,9 @@ def check_server(server_info):
         "provider": server_info.get("provider", ""),
         "speed": server_info.get("speed", 0),
         "features": server_info.get("features", []),
+        "ip6": ip6,
         "dnsbl": listed_on,
+        "dnsbl6": listed6,
         "policy": policy_on,
         "dnsbl_why": why,
         "threat": extra_lists,
@@ -443,6 +508,30 @@ def compute_trends(history, current_results):
             else:
                 trends[h] = "stable"
     return trends
+
+
+def compute_flapping(history, window=24, min_flips=4):
+    """Servers whose verdict keeps bouncing between clean and not-clean.
+
+    A server that is steadily RISKY is just dirty; one that flips every few
+    runs is unreliable in a way a single snapshot can't show, and it is the
+    thing you actually want to avoid picking as a "recommended" exit.
+    """
+    recent = history[-window:]
+    if len(recent) < 6:
+        return {}
+    seen = {}
+    for snap in recent:
+        for hostname, verdict in snap["servers"].items():
+            seen.setdefault(hostname, []).append(verdict in ("CLEAN", "FAIR"))
+    flapping = {}
+    for hostname, states in seen.items():
+        if len(states) < 6:
+            continue
+        flips = sum(1 for i in range(1, len(states)) if states[i] != states[i - 1])
+        if flips >= min_flips:
+            flapping[hostname] = flips
+    return flapping
 
 
 def compute_last_clean(history):
@@ -574,7 +663,7 @@ def health_gauge(clean_pct):
     </svg>"""
 
 
-def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proximity_order, city_meta, prev_health_pct=None, source_health=None):
+def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proximity_order, city_meta, prev_health_pct=None, source_health=None, flapping=None):
     VERDICT_ORDER = {"CLEAN": 0, "FAIR": 1, "ELEVATED": 2, "RISKY": 3, "BURNED": 4, "UNKNOWN": 5}
 
     total_servers = 0
@@ -650,6 +739,9 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
                 trend_html = '<span class="trend up" title="Improving">&#9650;</span>'
             elif trend == "degrading":
                 trend_html = '<span class="trend down" title="Degrading">&#9660;</span>'
+            flips = (flapping or {}).get(hostname, 0)
+            if flips:
+                trend_html += f'<span class="flap" title="Verdict flipped {flips}x across the last 24 checks - unstable">~</span>'
 
             lc_html = ""
             if lc and v != "CLEAN":
@@ -1106,6 +1198,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
   .badge.unknown {{ background: var(--border); color: var(--muted); }}
   .bl-hit {{ cursor: help; text-decoration: underline dotted currentColor; text-underline-offset: 2px; }}
   .bl-policy {{ color: var(--muted); }}
+  .flap {{ color: var(--orange); cursor: help; font-weight: 700; }}
   .legend {{
     display: flex; gap: .8rem; margin-bottom: 1rem; flex-wrap: wrap;
     font-size: .78rem; color: var(--muted);
@@ -1626,7 +1719,7 @@ window.addEventListener('hashchange', openAnchor);
 
 # ── JSON API ────────────────────────────────────────────────────────────────
 
-def generate_api_json(results, timestamp, trends, proximity_order, city_meta, source_health=None):
+def generate_api_json(results, timestamp, trends, proximity_order, city_meta, source_health=None, flapping=None):
     """Generate JSON API with summary + all servers."""
     VERDICT_ORDER = {"CLEAN": 0, "FAIR": 1, "ELEVATED": 2, "RISKY": 3, "BURNED": 4, "UNKNOWN": 5}
 
@@ -1665,6 +1758,9 @@ def generate_api_json(results, timestamp, trends, proximity_order, city_meta, so
                 "dnsbl": s.get("dnsbl", []),
                 "features": s.get("features", []),
             }
+            flips = (flapping or {}).get(s["hostname"], 0)
+            if flips:
+                server_entry["flapping"] = flips
             if s.get("policy"):
                 server_entry["policy"] = s["policy"]
             if s.get("dnsbl_why"):
@@ -1673,7 +1769,9 @@ def generate_api_json(results, timestamp, trends, proximity_order, city_meta, so
             if v in ("CLEAN", "FAIR"):
                 recommended.append({"rank": prox, "vo": VERDICT_ORDER.get(v, 5), **server_entry})
 
-    recommended.sort(key=lambda s: (s["rank"], s["vo"], s["fraud"]))
+    # Flapping exits sort last within their tier — a server that keeps bouncing
+    # is a bad recommendation even when this snapshot catches it clean.
+    recommended.sort(key=lambda s: (s["rank"], s["vo"], 1 if s.get("flapping") else 0, s["fraud"]))
     # Strip sort keys from recommended output
     for r in recommended:
         r.pop("rank", None)
@@ -1788,6 +1886,21 @@ def main():
     history_file = output_dir / "mullvad-history.json"
     fraud_cache_file = output_dir / "mullvad-fraud-cache.json"
 
+    global CHECK_IPV6, _dqs_key
+    CHECK_IPV6 = bool(cfg["check_ipv6"])
+    # Env wins over config so CI can inject the key without a committed file.
+    _dqs_key = (os.environ.get("SPAMHAUS_DQS_KEY", "") or cfg["spamhaus_dqs_key"]).strip()
+    if _dqs_key and dqs_key_works():
+        print("Spamhaus DQS key verified — querying the dedicated zone (no open-resolver ACL)", flush=True)
+    elif _dqs_key:
+        _dqs_key = ""
+        print("WARNING: SPAMHAUS_DQS_KEY did not answer the 127.0.0.2 test record — "
+              "key is wrong, expired, or over quota. Falling back to the public mirrors.",
+              file=sys.stderr, flush=True)
+    else:
+        print("No Spamhaus DQS key (SPAMHAUS_DQS_KEY) — using the free public mirrors, "
+              "which may refuse queries from shared resolvers", flush=True)
+
     # AbuseIPDB: opt-in via env. Missing key = fraud column populated as -1.
     global _abuseipdb_key, _fraud_cache
     _abuseipdb_key = os.environ.get("ABUSEIPDB_API_KEY", "").strip() or None
@@ -1873,6 +1986,7 @@ def main():
     history = append_to_history(results, ts, history_file, max_history)
     trends = compute_trends(history, results)
     last_clean = compute_last_clean(history)
+    flapping = compute_flapping(history)
 
     # Compute previous health % for overall trend
     prev_health_pct = None
@@ -1885,10 +1999,10 @@ def main():
 
     source_health = summarize_sources()
 
-    html = generate_html(results, ts, ts_iso, history, trends, last_clean, proximity_order, city_meta, prev_health_pct, source_health=source_health)
+    html = generate_html(results, ts, ts_iso, history, trends, last_clean, proximity_order, city_meta, prev_health_pct, source_health=source_health, flapping=flapping)
     output_file.write_text(html)
 
-    api_data = generate_api_json(results, ts, trends, proximity_order, city_meta, source_health=source_health)
+    api_data = generate_api_json(results, ts, trends, proximity_order, city_meta, source_health=source_health, flapping=flapping)
     api_file.write_text(json.dumps(api_data, indent=2))
 
     feed_xml = generate_feed(results, ts, ts_iso, history, city_meta)

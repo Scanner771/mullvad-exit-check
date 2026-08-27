@@ -8,6 +8,30 @@ Scans Mullvad VPN WireGuard exit servers against DNSBLs, threat intelligence fee
 
 > GitHub throttles scheduled workflows on public repos, so the real interval is closer to an hour and multi-hour gaps happen. The dashboard always shows the timestamp of the run you're looking at.
 
+## Spamhaus DQS key (recommended, free)
+
+Spamhaus ACLs its free public mirrors against shared and public resolvers: instead of real
+data you get `127.255.255.254`, "query refused". A [free DQS
+key](https://www.spamhaus.com/free-trial/sign-up-for-a-free-data-query-service-account/)
+moves queries to a dedicated zone with no ACL and a 300k/day allowance.
+
+```bash
+export SPAMHAUS_DQS_KEY="your-key"
+```
+
+The key is used in the DNS query only — it never appears in the HTML, the JSON API, or the
+source-health names. It is validated against the `127.0.0.2` test record at startup; a wrong
+or expired key falls back to the public mirrors with a warning rather than silently reporting
+every server clean.
+
+## Flapping exits
+
+A server that is steadily listed is simply dirty. One that flips between clean and listed
+every few runs is unreliable in a way a single snapshot cannot show. Any exit whose verdict
+crossed the clean/not-clean line 4+ times in the last 24 checks gets a `~` marker, a
+`flapping` count in the JSON API, and is sorted below stable servers of the same verdict in
+the recommended list.
+
 ## A note on Spamhaus PBL
 
 PBL is a *policy* listing: the ISP has declared that a range should not be sending email
@@ -26,6 +50,7 @@ Mullvad exit IPs get burned by Cloudflare and other services regularly. You'll h
 |--------|------|-------------------|
 | Spamhaus, Barracuda, SpamCop, UCEPROTECT | DNSBL | Direct (RISKY/BURNED) |
 | Spamhaus **PBL** | Mail policy | Shown, but **not** counted — see below |
+| Spamhaus (IPv6) | DNSBL | Direct — every relay's `ipv6_addr_in` is checked too. The other three lists do not answer IPv6 queries |
 | AbuseIPDB | Abuse confidence (0–100) | Direct (FAIR/ELEVATED) — requires `ABUSEIPDB_API_KEY` |
 | Spamhaus XBL | Threat intel | Informational only — derived from the `zen` return codes, not a separate query |
 
@@ -85,6 +110,8 @@ Create a `config.json` to customize behavior:
 | `proximity` | alphabetical | Order for "Recommended Exits" sorting (closest first) |
 | `output_dir` | script dir | Where to write report.html, api.json, history.json |
 | `max_workers` | 10 | Concurrent threads for IP checks |
+| `check_ipv6` | `true` | Also check each relay's IPv6 address against Spamhaus |
+| `spamhaus_dqs_key` | `""` | DQS key; `SPAMHAUS_DQS_KEY` in the environment wins over this |
 | `max_history` | 336 | Snapshots to retain (336 = 7 days at a true 30min interval; longer if runs are throttled) |
 
 ### City codes
