@@ -64,6 +64,11 @@ ZEN_CODES = {
     "127.0.0.30": "BCL - botnet command-and-control server",
 }
 _ZEN_XBL_CODES = {"127.0.0.4", "127.0.0.5", "127.0.0.6", "127.0.0.7"}
+# PBL is a policy listing: "the ISP says this range should not send email".
+# That is true of nearly every VPN and hosting range and says nothing about
+# whether the exit is burned for browsing, which is what this tool measures.
+# A PBL-only hit is reported but does not make a server RISKY.
+_ZEN_POLICY_CODES = {"127.0.0.10", "127.0.0.11"}
 
 # Abusix + http:BL removed 2026-07: both require an API-key query prefix and
 # were silent no-ops without one. cbl.abuseat.org removed: retired, alias of
@@ -336,18 +341,22 @@ def check_server(server_info):
     ip = server_info["ip"]
     hostname = server_info["hostname"]
     listed_on = []
+    policy_on = []
     why = {}
     zen_codes = set()
     for bl_host, bl_name in DNSBLS:
         codes = check_dnsbl(ip, bl_host)
         if not codes:
             continue
-        listed_on.append(bl_name)
         if bl_host == ZEN_HOST:
             zen_codes = set(codes)
             reasons = [ZEN_CODES[c] for c in codes if c in ZEN_CODES]
             if reasons:
                 why[bl_name] = reasons
+            if zen_codes <= _ZEN_POLICY_CODES:
+                policy_on.append(bl_name)
+                continue
+        listed_on.append(bl_name)
     fraud = check_fraud(ip)
     threat_intel = check_honeypot(ip)
     extra_lists = [name for name, hit in threat_intel.items() if hit]
@@ -362,6 +371,7 @@ def check_server(server_info):
         "speed": server_info.get("speed", 0),
         "features": server_info.get("features", []),
         "dnsbl": listed_on,
+        "policy": policy_on,
         "dnsbl_why": why,
         "threat": extra_lists,
         "fraud": fraud,
@@ -601,7 +611,11 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
                 # DNSBL_TIPS values are already entity-escaped.
                 return f"{tip} &mdash; {'; '.join(h(r) for r in _why[d])}" if _why.get(d) else tip
 
-            dnsbl_str = ", ".join(f'<span class="bl-hit" title="{_bl_tip(d)}">{d}</span>' for d in s["dnsbl"]) if s["dnsbl"] else "None"
+            bl_parts = [f'<span class="bl-hit" title="{_bl_tip(d)}">{d}</span>' for d in s["dnsbl"]]
+            # PBL-only hits are shown greyed out — informational, not a verdict.
+            bl_parts += [f'<span class="bl-hit bl-policy" title="{_bl_tip(d)}">{d} (mail policy)</span>'
+                         for d in s.get("policy", [])]
+            dnsbl_str = ", ".join(bl_parts) if bl_parts else "None"
             threat_list = s.get("threat", [])
             threat_str = ", ".join(threat_list) if threat_list else "None"
             threat_count = len(threat_list)
@@ -624,6 +638,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
                 "h": hostname, "ip": s["ip"], "city": city_name,
                 "country": meta["country_name"], "fraud": fraud,
                 "dnsbl": "|".join(s["dnsbl"]) if s["dnsbl"] else "",
+                "policy": "|".join(s.get("policy", [])),
                 "dnsbl_why": "|".join(r for rs in why.values() for r in rs),
                 "threats": "|".join(threat_list) if threat_list else "",
                 "verdict": v, "owned": "yes" if owned else "no",
@@ -1090,6 +1105,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
   .badge.burned {{ background: var(--red-dim); color: var(--red); }}
   .badge.unknown {{ background: var(--border); color: var(--muted); }}
   .bl-hit {{ cursor: help; text-decoration: underline dotted currentColor; text-underline-offset: 2px; }}
+  .bl-policy {{ color: var(--muted); }}
   .legend {{
     display: flex; gap: .8rem; margin-bottom: 1rem; flex-wrap: wrap;
     font-size: .78rem; color: var(--muted);
@@ -1196,6 +1212,7 @@ def generate_html(results, timestamp, ts_iso, history, trends, last_clean, proxi
 
 <div class="footer">
     DNSBLs: {', '.join(n for _, n in DNSBLS)} | Fraud scoring: AbuseIPDB | Threat intel: Spamhaus XBL (from zen return codes)<br>
+    Spamhaus PBL hits are shown but not counted &mdash; PBL only means "this range should not send email", which is true of almost every VPN range<br>
     Rechecked up to every 30 minutes (GitHub throttles scheduled runs, so gaps happen) | <a href="feed.xml" class="footer-link">Atom feed</a> | <a href="https://github.com/Scanner771/mullvad-exit-check" class="footer-link">mullvad-exit-check</a>
 </div>
 
@@ -1357,7 +1374,7 @@ function exportClean() {{
 function exportCSV() {{
     const data = JSON.parse(document.getElementById('csv-data').textContent);
     if (!data.length) {{ alert('No data to export.'); return; }}
-    const cols = ['hostname','ip','city','country','fraud','dnsbl','dnsbl_why','threats','verdict','owned','provider','features'];
+    const cols = ['hostname','ip','city','country','fraud','dnsbl','policy','dnsbl_why','threats','verdict','owned','provider','features'];
     const header = cols.join(',');
     const rows = data.map(r => cols.map(c => {{
         const key = c === 'hostname' ? 'h' : c;
@@ -1648,6 +1665,8 @@ def generate_api_json(results, timestamp, trends, proximity_order, city_meta, so
                 "dnsbl": s.get("dnsbl", []),
                 "features": s.get("features", []),
             }
+            if s.get("policy"):
+                server_entry["policy"] = s["policy"]
             if s.get("dnsbl_why"):
                 server_entry["dnsbl_why"] = s["dnsbl_why"]
             all_servers.append(server_entry)
