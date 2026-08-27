@@ -40,6 +40,9 @@ jobs:
       - name: Run reputation check
         env:
           ABUSEIPDB_API_KEY: ${{ secrets.ABUSEIPDB_API_KEY }}
+          # Optional. Without it, Spamhaus refuses queries from the runner's
+          # shared resolver at random and those servers report as source-fail.
+          SPAMHAUS_DQS_KEY: ${{ secrets.SPAMHAUS_DQS_KEY }}
         run: |
           mkdir -p public
           if [ -f public/mullvad-history.json ]; then
