@@ -4,7 +4,9 @@
 
 Scans Mullvad VPN WireGuard exit servers against DNSBLs, threat intelligence feeds, and the AbuseIPDB abuse-confidence database. Generates an interactive HTML report showing which exits are clean and safe to use.
 
-**[View live report](https://scanner771.github.io/mullvad-exit-check/)** — checks every 30 minutes, always up to date.
+**[View live report](https://scanner771.github.io/mullvad-exit-check/)** — rechecked up to every 30 minutes.
+
+> GitHub throttles scheduled workflows on public repos, so the real interval is closer to an hour and multi-hour gaps happen. The dashboard always shows the timestamp of the run you're looking at.
 
 ## Why?
 
@@ -16,7 +18,7 @@ Mullvad exit IPs get burned by Cloudflare and other services regularly. You'll h
 |--------|------|-------------------|
 | Spamhaus, Barracuda, SpamCop, UCEPROTECT | DNSBL | Direct (RISKY/BURNED) |
 | AbuseIPDB | Abuse confidence (0–100) | Direct (FAIR/ELEVATED) — requires `ABUSEIPDB_API_KEY` |
-| Spamhaus XBL | Threat intel | Informational only |
+| Spamhaus XBL | Threat intel | Informational only — derived from the `zen` return codes, not a separate query |
 
 ### Verdict scale
 
@@ -74,7 +76,7 @@ Create a `config.json` to customize behavior:
 | `proximity` | alphabetical | Order for "Recommended Exits" sorting (closest first) |
 | `output_dir` | script dir | Where to write report.html, api.json, history.json |
 | `max_workers` | 10 | Concurrent threads for IP checks |
-| `max_history` | 336 | Snapshots to retain (336 = 7 days at 30min intervals) |
+| `max_history` | 336 | Snapshots to retain (336 = 7 days at a true 30min interval; longer if runs are throttled) |
 
 ### City codes
 
@@ -163,11 +165,11 @@ The API includes summary stats, top 10 recommended servers, and the full server 
         }
     ],
     "servers": [ ... ],
+    "_note": "listed servers also carry dnsbl_why, e.g. {\"Spamhaus\": [\"PBL - ISP declared this range should not send mail\"]}",
     "sources": {
         "groups": {
-            "DNSBLs":       {"ok": 2660, "fail": 0, "cached": 0, "skipped": 0, "status": "ok"},
-            "Threat intel": {"ok": 2128, "fail": 0, "cached": 0, "skipped": 0, "status": "ok"},
-            "AbuseIPDB":    {"ok": 22,   "fail": 0, "cached": 511, "skipped": 0, "status": "ok"}
+            "DNSBLs":    {"ok": 2176, "fail": 0, "cached": 0, "skipped": 0, "status": "ok"},
+            "AbuseIPDB": {"ok": 22,   "fail": 0, "cached": 511, "skipped": 0, "status": "ok"}
         },
         "sources": { "dnsbl:zen.spamhaus.org": {...}, "abuseipdb": {...} }
     }
@@ -184,7 +186,7 @@ The `sources` block surfaces silent regressions: status flips to `degraded` (≥
 - Filter buttons: All / Clean only / Usable (clean + fair)
 - Feature filters: SOCKS5, DAITA, Multihop, IPv6, Mullvad-owned (with AND/OR toggle)
 - Collapsible country/city sections with mini progress bars
-- Per-server: fraud score, DNSBL status (with tooltips), threat intel hits, owned/rented badge
+- Per-server: fraud score, DNSBL status (tooltip names *why* Spamhaus listed it — SBL / CSS / XBL / DROP / PBL / BCL), threat intel hits, owned/rented badge
 - Sparkline history (last 24 checks)
 - Trend arrows (improving/degrading/stable)
 - Last-clean date for currently dirty servers
@@ -220,7 +222,7 @@ docker run --rm -v ./public:/data mullvad-check --cities lon sto nyc
 
 ### Running in CI
 
-The repo's GitHub Action runs every 30 min and publishes to GitHub Pages. To enable the AbuseIPDB lookups when forking, add `ABUSEIPDB_API_KEY` under **Settings → Secrets and variables → Actions → New repository secret**. Without it the workflow still runs but the fraud column stays empty — the source-health pill will read DISABLED so consumers know.
+The repo's GitHub Action is scheduled every 30 min (GitHub delays scheduled runs under load, so expect roughly hourly in practice) and publishes to GitHub Pages. Every action is pinned to a commit SHA; Dependabot (`.github/dependabot.yml`) opens weekly PRs to move those pins forward. To enable the AbuseIPDB lookups when forking, add `ABUSEIPDB_API_KEY` under **Settings → Secrets and variables → Actions → New repository secret**. Without it the workflow still runs but the fraud column stays empty — the source-health pill will read DISABLED so consumers know.
 
 ## License
 
